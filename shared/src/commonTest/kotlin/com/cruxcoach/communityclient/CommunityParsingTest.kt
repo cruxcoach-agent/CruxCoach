@@ -7,6 +7,7 @@ import com.cruxcoach.communityclient.CommunityTestEvents.event
 import com.cruxcoach.communityclient.CommunityTestEvents.id
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -153,18 +154,62 @@ class CommunityParsingTest {
         val edit = event(40003, listOf(listOf("h", CHANNEL), listOf("e", msg.id)), "edited", id = id(30), createdAt = msg.createdAt + 5)
         val foreignEdit = event(40003, listOf(listOf("h", CHANNEL), listOf("e", msg.id)), "hijack", pubkey = BOB, id = id(31), createdAt = msg.createdAt + 9)
         val reaction = event(7, listOf(listOf("e", msg.id)), "🔥", pubkey = BOB, id = id(32))
-        val foreignDelete = event(5, listOf(listOf("e", other.id)), id = id(33))
-        val ownDelete = event(5, listOf(listOf("e", other.id)), pubkey = BOB, id = id(34))
+        val delete = event(5, listOf(listOf("e", other.id)), pubkey = BOB, id = id(34))
 
-        val result = applyAux(listOf(msg, other), listOf(edit, foreignEdit, reaction, foreignDelete))
+        val result = applyAux(listOf(msg, other), listOf(edit, foreignEdit, reaction))
         assertEquals("edited", result[0].displayContent)
         assertEquals(mapOf("🔥" to setOf(BOB)), result[0].reactions)
+        assertEquals(reaction.id, result[0].reactionId("🔥", BOB))
         assertFalse(result[1].isDeleted)
-        assertTrue(applyAux(listOf(msg, other), listOf(ownDelete))[1].isDeleted)
+        assertTrue(applyAux(listOf(msg, other), listOf(delete))[1].isDeleted)
+        // The relay decides who may delete (an agent's owner may too), so a kind:5 it delivers counts.
+        val ownerDelete = event(5, listOf(listOf("e", other.id)), id = id(33))
+        assertTrue(applyAux(listOf(msg, other), listOf(ownerDelete))[1].isDeleted)
 
         // A deleted reaction no longer counts.
         val unreact = event(5, listOf(listOf("e", reaction.id)), pubkey = BOB, id = id(35))
         assertTrue(applyAux(listOf(msg), listOf(reaction, unreact))[0].reactions.isEmpty())
+        assertNull(applyAux(listOf(msg), listOf(reaction, unreact))[0].reactionId("🔥", BOB))
+        // A second reaction of the same author with the same emoji counts once; the newest id is kept.
+        val again = event(7, listOf(listOf("e", msg.id)), "🔥", pubkey = BOB, id = id(37), createdAt = reaction.createdAt + 1)
+        val twice = applyAux(listOf(msg), listOf(reaction, again))[0]
+        assertEquals(mapOf("🔥" to setOf(BOB)), twice.reactions)
+        assertEquals(again.id, twice.reactionId("🔥", BOB))
+        assertNull(twice.reactionId("🔥", CommunityTestEvents.ALICE))
+    }
+
+    @Test
+    fun messageActionTemplates_matchTheBuzzApps() {
+        val target = id(10)
+        val reaction = CommunityEventTemplates.reaction(target, " 👍 ", 1_000)
+        assertEquals(CommunityKinds.REACTION, reaction.kind)
+        assertEquals(listOf(listOf("e", target)), reaction.tags)
+        assertEquals("👍", reaction.content)
+        assertFailsWith<IllegalArgumentException> { CommunityEventTemplates.reaction(target, "  ", 1_000) }
+        assertFailsWith<IllegalArgumentException> { CommunityEventTemplates.reaction("stream", "👍", 1_000) }
+
+        assertEquals(listOf(listOf("e", id(11))), CommunityEventTemplates.removeReaction(id(11), 1_000).tags)
+        assertEquals(CommunityKinds.DELETION, CommunityEventTemplates.removeReaction(id(11), 1_000).kind)
+
+        val edit = CommunityEventTemplates.edit(CHANNEL, target, "new text", 1_000)
+        assertEquals(CommunityKinds.STREAM_MESSAGE_EDIT, edit.kind)
+        assertEquals(listOf(listOf("h", CHANNEL), listOf("e", target)), edit.tags)
+        assertFailsWith<IllegalArgumentException> { CommunityEventTemplates.edit(CHANNEL, target, " ", 1_000) }
+
+        val delete = CommunityEventTemplates.deleteOwn(CHANNEL, target, 1_000)
+        assertEquals(CommunityKinds.DELETION, delete.kind)
+        assertEquals(listOf(listOf("h", CHANNEL), listOf("e", target)), delete.tags)
+        val remove = CommunityEventTemplates.removeMessage(CHANNEL, target, 1_000)
+        assertEquals(CommunityKinds.GROUP_DELETE_EVENT, remove.kind)
+        assertEquals(listOf(listOf("h", CHANNEL), listOf("e", target)), remove.tags)
+
+        val reportMessage = CommunityEventTemplates.report(ReportTarget.Message(target, BOB), ReportType.SPAM, "  ads  ", 1_000)
+        assertEquals(CommunityKinds.REPORT, reportMessage.kind)
+        assertEquals(listOf(listOf("e", target, "spam"), listOf("p", BOB)), reportMessage.tags)
+        assertEquals("ads", reportMessage.content)
+        val reportPerson = CommunityEventTemplates.report(ReportTarget.Person(BOB), ReportType.IMPERSONATION, "x".repeat(900), 1_000)
+        assertEquals(listOf(listOf("p", BOB, "impersonation")), reportPerson.tags)
+        assertEquals(MAX_REPORT_REASON_LENGTH, reportPerson.content.length)
     }
 
     @Test

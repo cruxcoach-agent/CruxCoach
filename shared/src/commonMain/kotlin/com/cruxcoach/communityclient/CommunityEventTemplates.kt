@@ -67,8 +67,10 @@ object CommunityEventTemplates {
     /**
      * NIP-98 HTTP auth for one request. Buzz requires exactly one `u` and one `method`
      * tag, and a `payload` tag (hex SHA-256 of the body) on POST routes with a body.
+     * The relay refuses an auth event it has seen before, so a [nonce] keeps two equal
+     * requests in the same second apart, as in the Buzz phone app.
      */
-    fun httpAuth(url: String, method: String, createdAt: Long, payloadSha256Hex: String?): UnsignedEvent =
+    fun httpAuth(url: String, method: String, createdAt: Long, payloadSha256Hex: String?, nonce: String = newNonce()): UnsignedEvent =
         UnsignedEvent(
             createdAt = createdAt,
             kind = CommunityKinds.HTTP_AUTH,
@@ -76,9 +78,14 @@ object CommunityEventTemplates {
                 add(listOf("u", url))
                 add(listOf("method", method.uppercase()))
                 if (payloadSha256Hex != null) add(listOf("payload", payloadSha256Hex))
+                add(listOf("nonce", nonce))
             },
             content = "",
         )
+
+    /** 128 random bits as hex. */
+    fun newNonce(random: kotlin.random.Random = kotlin.random.Random.Default): String =
+        random.nextBytes(16).joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
 
     /**
      * Direct reply to a thread head: one `reply` tag; deeper: `root` + `reply`.

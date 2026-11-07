@@ -107,4 +107,30 @@
     <!-- Amber: welche Unterschriften die Community braucht -->
     <string name="community_client_amber_title">Unterschreiben mit Amber</string>
     <string name="community_client_amber_body">Die Community braucht drei Arten von Unterschriften immer wieder: Anmelden (Kind 22242), Nachrichten über HTTP laden (Kind 27235) und Bilder laden (Kind 24242). Erlaube diese drei in Amber dauerhaft, dann fragt Amber nicht jedes Mal. Erlaube nicht „alles unterschreiben“: Vor jeder Nachricht, die du schreibst, soll Amber weiter fragen.</string>
+    <!-- Nachrichtenmenü: Reaktionen, bearbeiten, löschen, entfernen, melden -->
+    <string name="community_client_action_copy">Text kopieren</string>
+    <string name="community_client_action_edit">Bearbeiten</string>
+    <string name="community_client_action_delete">Löschen</string>
+    <string name="community_client_action_remove">Nachricht entfernen</string>
+    <string name="community_client_action_report_message">Nachricht melden</string>
+    <string name="community_client_action_report_person">Person melden</string>
+    <string name="community_client_action_failed">Das hat nicht geklappt: %1$s</string>
+    <string name="community_client_edit_title">Nachricht bearbeiten</string>
+    <string name="community_client_delete_title">Diese Nachricht löschen?</string>
+    <string name="community_client_delete_body">Sie verschwindet für alle im Raum.</string>
+    <string name="community_client_remove_title">Diese Nachricht entfernen?</string>
+    <string name="community_client_remove_body">Als Admin entfernst du sie für alle im Raum.</string>
+    <string name="community_client_report_message_title">Nachricht melden</string>
+    <string name="community_client_report_person_title">Person melden</string>
+    <string name="community_client_report_body">Deine Meldung geht nur an die Moderatoren der Community. Sonst sieht sie niemand.</string>
+    <string name="community_client_report_reason_hint">Was ist passiert? (optional)</string>
+    <string name="community_client_report_send">Meldung senden</string>
+    <string name="community_client_report_sent">Meldung an die Moderatoren gesendet.</string>
+    <string name="community_client_report_spam">Spam</string>
+    <string name="community_client_report_profanity">Beleidigung oder Beschimpfung</string>
+    <string name="community_client_report_impersonation">Gibt sich als jemand anderes aus</string>
+    <string name="community_client_report_nudity">Nacktheit</string>
+    <string name="community_client_report_illegal">Illegale Inhalte</string>
+    <string name="community_client_report_malware">Schadsoftware oder ein Betrugslink</string>
+    <string name="community_client_report_other">Etwas anderes</string>
 </resources>
