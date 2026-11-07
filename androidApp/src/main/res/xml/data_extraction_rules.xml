@@ -27,6 +27,8 @@
         <exclude domain="external" path="foodvision"/>
         <exclude domain="sharedpref" path="foodvision.xml"/>
         <exclude domain="sharedpref" path="health_connect_export.xml"/>
+        <!-- Community preview: joined key and per-installation read-state ids (NIP-RS). -->
+        <exclude domain="sharedpref" path="community_client.xml"/>
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="nostr_secure_prefs.xml"/>
@@ -48,5 +50,6 @@
         <exclude domain="external" path="foodvision"/>
         <exclude domain="sharedpref" path="foodvision.xml"/>
         <exclude domain="sharedpref" path="health_connect_export.xml"/>
+        <exclude domain="sharedpref" path="community_client.xml"/>
     </device-transfer>
 </data-extraction-rules>

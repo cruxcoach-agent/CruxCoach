@@ -56,3 +56,28 @@ fun interface UnixClock {
 
 /** Hex SHA-256 of [bytes]. */
 expect fun sha256Hex(bytes: ByteArray): String
+
+/** NIP-44 encryption to the user's own key, for data only the user's devices read. */
+interface SelfCipher {
+    suspend fun encryptToSelf(plaintext: String): String
+    suspend fun decryptFromSelf(ciphertext: String): String
+}
+
+/** This installation's read state as it is kept between runs. */
+data class StoredReadState(val clientId: String, val slotId: String, val contexts: Map<String, Long>)
+
+/** Where the client keeps its read state and installation ids between runs. */
+interface ReadStateStore {
+    fun load(): StoredReadState
+    fun save(state: StoredReadState)
+}
+
+/** Read state kept in memory only, e.g. in tests. */
+class MemoryReadStateStore(
+    private var state: StoredReadState = StoredReadState(ReadStateBlob.newSlotId(), ReadStateBlob.newSlotId(), emptyMap()),
+) : ReadStateStore {
+    override fun load(): StoredReadState = state
+    override fun save(state: StoredReadState) {
+        this.state = state
+    }
+}

@@ -10,6 +10,7 @@ import com.cruxcoach.communityclient.CommunityInvite
 import com.cruxcoach.communityclient.CommunityJoin
 import com.cruxcoach.communityclient.CommunityKinds
 import com.cruxcoach.communityclient.MentionCandidate
+import com.cruxcoach.communityclient.ReadStateBlob
 import com.cruxcoach.communityclient.Mentions
 import com.cruxcoach.communityclient.ReportTarget
 import com.cruxcoach.communityclient.ReportType
@@ -24,6 +25,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
@@ -187,6 +189,29 @@ class CommunityServerIntegrationTest {
             }
             assertTrue(everything.messages.size > 3, "more than one page was loaded")
             assertTrue(everything.messages.any { it.id == ownerMessage.id }, "paging reached the room's first messages")
+
+            // Unread: top-level messages by others since the read time; marking read clears it, and a recount stays at zero.
+            val latest = owner.sendMessage(streamId, "anything new?").also { assertAccepted(it) }.event
+            withTimeout(30_000) { joiner.rooms.first { s -> s.rooms.any { it.channel.id == streamId && it.isMember } } }
+            // The counts are a flow derived on the client's scope: wait for them, do not read them at once.
+            joiner.refreshUnread()
+            withTimeout(10_000) { joiner.unread.first { (it[streamId] ?: 0) >= 1 } }
+            joiner.markRead(streamId, latest.createdAt)
+            withTimeout(10_000) { joiner.unread.first { it[streamId] == 0L } }
+            // Both Buzz apps' marks: the room mark (desktop) and the catch-up mark (phone).
+            withTimeout(10_000) {
+                joiner.readState.readAt.first { (it[streamId] ?: 0) >= latest.createdAt && (it[ReadStateBlob.activityKey(streamId)] ?: 0) >= latest.createdAt }
+            }
+            joiner.refreshUnread()
+            delay(500)
+            assertEquals(0L, joiner.unread.value[streamId], "nothing newer than the read time")
+            // A reply in someone else's thread counts only when it names you, as in the Buzz phone app.
+            while (clock.nowSeconds() <= latest.createdAt) delay(100)
+            assertAccepted(owner.sendMessage(streamId, "just us", ThreadRef(latest.id, latest.id)))
+            assertAccepted(owner.sendMessage(streamId, "@CI joiner look", ThreadRef(latest.id, latest.id), mentions = listOf(joiner.me)))
+            joiner.refreshUnread()
+            delay(500)
+            assertEquals(1L, joiner.unread.value[streamId], "only the reply that names the joiner: ${joiner.unread.value}")
 
             // Forum: a topic from the joiner, a comment from the owner, seen live.
             val post = joiner.createForumPost(forumId, "Topic from the app\n\nDetails.").also { assertAccepted(it) }.event

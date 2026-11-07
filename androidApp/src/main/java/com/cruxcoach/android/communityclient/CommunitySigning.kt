@@ -3,6 +3,7 @@ package com.cruxcoach.android.communityclient
 import com.cruxcoach.communityclient.CommunityEvent
 import com.cruxcoach.communityclient.CommunitySigner
 import com.cruxcoach.communityclient.EventVerifier
+import com.cruxcoach.communityclient.SelfCipher
 import com.cruxcoach.communityclient.UnsignedEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.crypto.verifyId
@@ -29,6 +30,15 @@ internal class QuartzCommunitySigner(
         )
         return signed.toCommunityEvent()
     }
+}
+
+/** NIP-44 to the user's own key, through the local key or Amber, as the backup does it. */
+internal class QuartzSelfCipher(
+    private val signer: () -> QuartzSigner,
+    private val publicKey: () -> String,
+) : SelfCipher {
+    override suspend fun encryptToSelf(plaintext: String): String = signer().nip44Encrypt(plaintext, publicKey())
+    override suspend fun decryptFromSelf(ciphertext: String): String = signer().nip44Decrypt(ciphertext, publicKey())
 }
 
 /** Checks id and Schnorr signature with Quartz, like the app's other relay reads. */

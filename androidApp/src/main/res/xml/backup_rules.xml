@@ -65,4 +65,8 @@
          Connect. The food log itself (database) is not restored by Auto
          Backup, so on another phone this list would be wrong. -->
     <exclude domain="sharedpref" path="health_connect_export.xml"/>
+    <!-- Community preview: the joined key, and the read-state installation ids that
+         NIP-RS requires to be unique per installation. A restored copy would write
+         over the old phone's read state. -->
+    <exclude domain="sharedpref" path="community_client.xml"/>
 </full-backup-content>
