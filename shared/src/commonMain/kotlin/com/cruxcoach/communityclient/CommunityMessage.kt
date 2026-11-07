@@ -44,11 +44,16 @@ data class CommunityMessage(
     val isDeleted: Boolean = false,
     /** Emoji → authors who reacted with it. */
     val reactions: Map<String, Set<String>> = emptyMap(),
+    /** Emoji → author → id of that reaction event, so an author can take theirs back. */
+    val reactionIds: Map<String, Map<String, String>> = emptyMap(),
     /** Set for a relay notice (kind:40099); [content] is then its raw JSON. */
     val notice: SystemNotice? = null,
 ) {
     val isReply: Boolean get() = thread != null
     val displayContent: String get() = editedContent ?: content
+
+    /** The id of [pubkey]'s reaction with [emoji], if they reacted so. */
+    fun reactionId(emoji: String, pubkey: String): String? = reactionIds[emoji]?.get(pubkey)
 
     /** A top-level row in the channel timeline (NIP-CW: depth 0, or a broadcast reply). */
     val isTopLevel: Boolean get() = thread == null || isBroadcast
@@ -201,19 +206,23 @@ private fun parseObject(content: String): JsonObject? =
  */
 fun applyAux(rows: Collection<CommunityMessage>, aux: Collection<CommunityEvent>): List<CommunityMessage> {
     val byId = rows.associateBy { it.id }
+    val auxById = aux.associateBy { it.id }
     val deleted = HashSet<String>()
     for (event in aux) {
         when (event.kind) {
+            // NIP-29: the relay lets only the author or a room admin send this.
             CommunityKinds.GROUP_DELETE_EVENT -> deleted += event.tagValues("e")
             CommunityKinds.DELETION -> event.tagValues("e").forEach { target ->
-                val row = byId[target]
-                // NIP-09: only the author's own deletion counts. Unknown targets may be reactions.
-                if (row == null || row.author == event.pubkey) deleted += target
+                // NIP-09: only the author's own deletion counts, for messages and reactions alike.
+                // An unknown target may be an event that arrives later; it is checked again then.
+                val author = byId[target]?.author ?: auxById[target]?.pubkey
+                if (author == null || author == event.pubkey) deleted += target
             }
         }
     }
     val edits = HashMap<String, CommunityEvent>()
-    val reactions = HashMap<String, MutableMap<String, MutableSet<String>>>()
+    // Message → emoji → author → newest reaction event.
+    val reactions = HashMap<String, HashMap<String, HashMap<String, CommunityEvent>>>()
     for (event in aux) {
         if (event.id in deleted) continue
         when (event.kind) {
@@ -228,15 +237,19 @@ fun applyAux(rows: Collection<CommunityMessage>, aux: Collection<CommunityEvent>
                 val target = event.tagValues("e").lastOrNull() ?: continue
                 if (target !in byId) continue
                 val emoji = event.content.trim().ifEmpty { "+" }
-                reactions.getOrPut(target) { HashMap() }.getOrPut(emoji) { HashSet() } += event.pubkey
+                val byAuthor = reactions.getOrPut(target) { HashMap() }.getOrPut(emoji) { HashMap() }
+                val previous = byAuthor[event.pubkey]
+                if (previous == null || event.createdAt >= previous.createdAt) byAuthor[event.pubkey] = event
             }
         }
     }
     return rows.map { row ->
+        val mine = reactions[row.id]
         row.copy(
             editedContent = edits[row.id]?.content ?: row.editedContent,
             isDeleted = row.isDeleted || row.id in deleted,
-            reactions = reactions[row.id]?.mapValues { it.value.toSet() } ?: row.reactions,
+            reactions = mine?.mapValues { it.value.keys.toSet() } ?: row.reactions,
+            reactionIds = mine?.mapValues { (_, byAuthor) -> byAuthor.mapValues { it.value.id } } ?: row.reactionIds,
         )
     }
 }

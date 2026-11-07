@@ -225,6 +225,8 @@ data class CommunityRoomState(
     /** Messages sent from this screen; the composer clears its text when this goes up. */
     val sentCount: Int = 0,
     val joining: Boolean = false,
+    /** The outcome of the last reaction, edit, deletion or report, until it was shown. */
+    val feedback: ActionFeedback? = null,
 )
 
 @HiltViewModel
@@ -236,6 +238,7 @@ class CommunityRoomViewModel @Inject constructor(
     private val isForum: Boolean = savedState.get<String>("type") == ChannelType.FORUM.wire
     private val client: CommunityClient? = holder.client()
     private val local = MutableStateFlow(CommunityRoomState(isForum = isForum, me = client?.me.orEmpty()))
+    val actions = CommunityMessageActions(client, channelId, viewModelScope)
 
     val state: StateFlow<CommunityRoomState> = run {
         val c = client ?: return@run local.asStateFlow()
@@ -243,8 +246,8 @@ class CommunityRoomViewModel @Inject constructor(
         val content: Flow<Pair<StreamTimeline, ForumView>> =
             if (isForum) c.forum(channelId).map { StreamTimeline(loading = false) to it }
             else c.streamTimeline(channelId).map { it to ForumView(loading = false) }
-        combine(content.onEach { (s, f) -> requestAuthors(c, s, f) }, room, c.profiles, local) { (s, f), item, profiles, l ->
-            l.copy(room = item, stream = s, forum = f, profiles = profiles)
+        combine(content.onEach { (s, f) -> requestAuthors(c, s, f) }, room, c.profiles, local, actions.feedback) { (s, f), item, profiles, l, feedback ->
+            l.copy(room = item, stream = s, forum = f, profiles = profiles, feedback = feedback)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), local.value)
     }
 
@@ -286,6 +289,8 @@ data class CommunityThreadState(
     val sendError: String? = null,
     /** Replies sent from this screen; the composer clears its text when this goes up. */
     val sentCount: Int = 0,
+    /** The outcome of the last reaction, edit, deletion or report, until it was shown. */
+    val feedback: ActionFeedback? = null,
 )
 
 @HiltViewModel
@@ -298,6 +303,7 @@ class CommunityThreadViewModel @Inject constructor(
     private val isForum: Boolean = savedState.get<String>("type") == ChannelType.FORUM.wire
     private val client: CommunityClient? = holder.client()
     private val local = MutableStateFlow(CommunityThreadState(isForum = isForum, me = client?.me.orEmpty()))
+    val actions = CommunityMessageActions(client, channelId, viewModelScope)
 
     val state: StateFlow<CommunityThreadState> = run {
         val c = client ?: return@run local.asStateFlow()
@@ -307,7 +313,8 @@ class CommunityThreadViewModel @Inject constructor(
             room,
             c.profiles,
             local,
-        ) { thread, item, profiles, l -> l.copy(thread = thread, room = item, profiles = profiles) }
+            actions.feedback,
+        ) { thread, item, profiles, l, feedback -> l.copy(thread = thread, room = item, profiles = profiles, feedback = feedback) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), local.value)
     }
 
@@ -325,7 +332,7 @@ class CommunityThreadViewModel @Inject constructor(
 }
 
 /** Null when the relay accepted the event, else why not (relay message or signer refusal). */
-private suspend fun publishError(block: suspend () -> PublishResult): String? =
+internal suspend fun publishError(block: suspend () -> PublishResult): String? =
     try {
         block().let { if (it.accepted) null else it.message.ifBlank { "refused" } }
     } catch (e: kotlinx.coroutines.CancellationException) {

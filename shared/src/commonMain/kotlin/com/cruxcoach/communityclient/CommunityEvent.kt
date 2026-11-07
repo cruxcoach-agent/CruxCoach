@@ -69,6 +69,7 @@ object CommunityKinds {
     const val GROUP_CREATE = 9007
     const val GROUP_JOIN_REQUEST = 9021
     const val GROUP_LEAVE_REQUEST = 9022
+    const val REPORT = 1984
     const val AUTH = 22242
     const val HTTP_AUTH = 27235
     const val GROUP_METADATA = 39000
