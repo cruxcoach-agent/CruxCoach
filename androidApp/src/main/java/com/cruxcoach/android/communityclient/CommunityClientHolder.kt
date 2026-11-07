@@ -8,6 +8,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.cruxcoach.android.BuildConfig
+import com.cruxcoach.android.data.SqlCipherKeyManager
 import com.cruxcoach.android.nostr.NostrSigner
 import com.cruxcoach.android.payment.NostrProfileManager
 import com.cruxcoach.communityclient.CommunityApi
@@ -66,6 +67,7 @@ class CommunityClientHolder @Inject constructor(
     @param:ApplicationContext private val context: Context,
     private val nostrSigner: NostrSigner,
     private val profileManager: NostrProfileManager,
+    private val keyManager: SqlCipherKeyManager,
     @param:Named("nostr") private val okHttpClient: OkHttpClient,
 ) {
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -80,6 +82,7 @@ class CommunityClientHolder @Inject constructor(
 
     private var client: CommunityClient? = null
     private var clientScope: CoroutineScope? = null
+    private var clientCache: SqlCommunityCache? = null
     private var clientKey: Pair<CommunityEndpoint, String>? = null
 
     /**
@@ -150,8 +153,13 @@ class CommunityClientHolder @Inject constructor(
 
     /** Forgets the joined community on this device (membership on the server stays). */
     fun forgetCommunity() {
-        prefs.edit().remove(KEY_HOST).remove(KEY_SECURE).remove(KEY_JOINED_PUBKEY).remove(KEY_ASK_NAME_PUBKEY).apply()
-        closeClient()
+        val pubkey = runCatching { signer.pubkey }.getOrNull()
+        val host = prefs.getString(KEY_HOST, null)
+        val edit = prefs.edit().remove(KEY_HOST).remove(KEY_SECURE).remove(KEY_JOINED_PUBKEY).remove(KEY_ASK_NAME_PUBKEY)
+        // What this device kept about the community goes too: read times and the cache file.
+        if (pubkey != null && host != null) edit.remove("$KEY_READ_STATE_PREFIX$pubkey@$host")
+        edit.apply()
+        closeClient(deleteCacheOf = pubkey)
         _setup.value = readSetup()
     }
 
@@ -173,6 +181,9 @@ class CommunityClientHolder @Inject constructor(
             // Its own scope, so closing the client ends everything it started.
             val ownScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             clientScope = ownScope
+            // The encrypted file opens on first use, on the IO dispatcher.
+            val cache = SqlCommunityCache(context, keyManager, key.second)
+            clientCache = cache
             client = CommunityClient(
                 endpoint = endpoint,
                 socketFactory = sockets,
@@ -185,6 +196,7 @@ class CommunityClientHolder @Inject constructor(
                 onTiming = { step, millis -> Log.i(TAG, "event=timing step=$step ms=$millis") },
                 cipher = QuartzSelfCipher(signer = boundSigner, publicKey = { pubkey }),
                 readStore = PrefsReadStateStore(prefs, "$KEY_READ_STATE_PREFIX${key.second}@${endpoint.host}"),
+                cache = cache,
             ).also { started ->
                 started.start()
                 if (!foreground) schedulePause(started)
@@ -204,14 +216,30 @@ class CommunityClientHolder @Inject constructor(
         CommunityJoin(CommunityApi(endpoint, http, signer, QuartzEventVerifier, clock))
 
     @Synchronized
-    private fun closeClient() {
+    private fun closeClient(deleteCacheOf: String? = null) {
         client?.stop()
         // Give the session a moment to close its socket, then end whatever the client still runs.
         val closing = clientScope
-        closing?.launch { delay(CLOSE_GRACE_MS); closing.cancel() }
+        val closingCache = clientCache
+        closing?.launch {
+            delay(CLOSE_GRACE_MS)
+            closing.cancel()
+            runCatching { closingCache?.close() }
+            if (deleteCacheOf != null) deleteCacheUnlessReopened(deleteCacheOf)
+        }
+        if (closing == null && deleteCacheOf != null) {
+            scope.launch { deleteCacheUnlessReopened(deleteCacheOf) }
+        }
         client = null
         clientScope = null
+        clientCache = null
         clientKey = null
+    }
+
+    /** Deletes a forgotten cache file, unless a new client for the same key opened it meanwhile. */
+    @Synchronized
+    private fun deleteCacheUnlessReopened(pubkey: String) {
+        if (clientKey?.second != pubkey) context.deleteDatabase(SqlCommunityCache.fileName(pubkey))
     }
 
     private fun readSetup(): CommunitySetup {

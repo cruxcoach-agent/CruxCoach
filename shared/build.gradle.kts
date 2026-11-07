@@ -77,5 +77,12 @@ sqldelight {
             packageName.set("com.cruxcoach.db.athlete")
             srcDirs.setFrom("src/commonMain/sqldelight/athlete")
         }
+        // Community preview cache (#73): rooms, messages and profiles as the relay sent them.
+        // Its own encrypted file per identity; it is a cache, so a schema change deletes and
+        // rebuilds it instead of migrating, and it never touches the other databases.
+        create("CommunityDatabase") {
+            packageName.set("com.cruxcoach.db.community")
+            srcDirs.setFrom("src/commonMain/sqldelight/community")
+        }
     }
 }

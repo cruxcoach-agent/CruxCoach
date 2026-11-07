@@ -21,6 +21,11 @@ expect class AthleteDriverFactory {
     fun createDriver(dbName: String): SqlDriver
 }
 
+/** Encrypted driver for the per-identity community cache (#73). */
+expect class CommunityDriverFactory {
+    fun createDriver(dbName: String): SqlDriver
+}
+
 private val framesAdapter = object : ColumnAdapter<String, ByteArray> {
     override fun decode(databaseValue: ByteArray): String = FramesBinaryCodec.decode(databaseValue)
     override fun encode(value: String): ByteArray = FramesBinaryCodec.encode(value)

@@ -60,6 +60,8 @@ class CommunityClient(
     /** Encrypts the read state to the user's own key; without it, read state stays on this device. */
     cipher: SelfCipher? = null,
     readStore: ReadStateStore = MemoryReadStateStore(),
+    /** Keeps the last rooms, messages and profiles between runs; null keeps nothing. */
+    private val cache: CommunityCache? = null,
 ) {
     val session = CommunitySession(endpoint, socketFactory, signer, verifier, clock, scope)
     val api = CommunityApi(endpoint, http, signer, verifier, clock)
@@ -110,6 +112,8 @@ class CommunityClient(
         if (watcher != null) return
         startedAt = elapsedMillis()
         watcher = scope.launch {
+            // The last known rooms and names first, before anything is on the network.
+            launch { loadCached() }
             // The relay key comes over HTTP while the socket signs in; relay-only kinds wait for it.
             launch {
                 val key = fetchRelayKey()
@@ -267,6 +271,46 @@ class CommunityClient(
     private fun Map<String, UnreadRules.Item>.newest(): Map<String, UnreadRules.Item> =
         if (size <= UNREAD_LIMIT) this else values.sortedByDescending { it.createdAt }.take(UNREAD_LIMIT).associateBy { it.id }
 
+    /** Shows what the cache holds while the network catches up. */
+    private suspend fun loadCached() {
+        val c = cache ?: return
+        val cachedProfiles = cacheRead { c.events(CommunityCache.PROFILES, null, MAX_CACHED_PROFILES) }.mapNotNull { CommunityProfile.fromEvent(it) }
+        if (cachedProfiles.isNotEmpty()) {
+            profilesLock.withLock {
+                val next = _profiles.value.toMutableMap()
+                cachedProfiles.forEach { p -> if ((next[p.pubkey]?.updatedAt ?: -1) < p.updatedAt) next[p.pubkey] = p }
+                _profiles.value = next
+            }
+        }
+        val events = cacheRead { c.events(CommunityCache.ROOMS, null, MAX_CACHED_ROOM_EVENTS) }
+        if (events.isEmpty()) return
+        val list = roomListFrom(events)
+        roomsLock.withLock {
+            // The network list wins if it was faster, even an empty one.
+            if (_rooms.value.firstListAfterSeconds == null) _rooms.value = _rooms.value.copy(rooms = list)
+        }
+    }
+
+    /** A cache that cannot be read is an empty cache. */
+    private suspend fun cacheRead(block: suspend () -> List<CommunityEvent>): List<CommunityEvent> = try {
+        block()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        emptyList()
+    }
+
+    private suspend fun cacheWrite(block: suspend (CommunityCache) -> Unit) {
+        val c = cache ?: return
+        try {
+            block(c)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // The cache only saves time; the relay stays the source.
+        }
+    }
+
     /** Ends the client for good: the socket closes and the session's coroutine ends. */
     fun stop() {
         watcher?.cancel()
@@ -316,25 +360,21 @@ class CommunityClient(
         _rooms.value = _rooms.value.copy(loading = true, error = null)
         try {
             // The open-room directory does not depend on my memberships: fetch both at once.
-            val (memberLists, metas) = coroutineScope {
+            val events = coroutineScope {
                 val directory = async {
                     session.query(listOf(CommunityFilters.channelDirectory())).also { timing("directory") }
                 }
-                val memberLists = session.query(listOf(CommunityFilters.myMemberships(me)))
-                    .mapNotNull { ChannelMembers.fromEvent(it) }
-                    .groupBy { it.channelId }
-                    .mapValues { (_, lists) -> lists.maxBy { it.revisionAt } }
+                val memberEvents = session.query(listOf(CommunityFilters.myMemberships(me)))
                 timing("memberships")
-                val mine = memberLists.values.filter { it.contains(me) }.map { it.channelId }
-                val myMetas = if (mine.isEmpty()) emptyList() else session.query(listOf(CommunityFilters.channelMetadata(mine)))
+                val mine = myRoomIds(memberEvents)
+                val myMetas = if (mine.isEmpty()) emptyList() else session.query(listOf(CommunityFilters.channelMetadata(mine.toList())))
                 timing("my_rooms")
-                memberLists to (myMetas + directory.await()).mapNotNull { CommunityChannel.fromEvent(it) }
+                memberEvents + myMetas + directory.await()
             }
-            val mine = memberLists.values.filter { it.contains(me) }.map { it.channelId }.toSet()
-            val roles = memberLists.filterKeys { it in mine }.mapValues { (_, list) -> list.roleOf(me) }
-            val list = buildRoomList(metas, mine, emptyMap(), roles)
+            val list = roomListFrom(events)
             val first = _rooms.value.firstListAfterSeconds ?: ((elapsedMillis() - startedAt) / 1000.0)
             _rooms.value = RoomsState(list, loading = false, error = null, firstListAfterSeconds = first)
+            cacheWrite { it.replace(CommunityCache.ROOMS, events.distinctBy { e -> e.id }) }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) {
                 // The caller left (e.g. a screen's scope); the list must not keep spinning.
@@ -343,6 +383,24 @@ class CommunityClient(
             }
             _rooms.value = _rooms.value.copy(loading = false, error = e.message ?: "loading rooms failed")
         }
+    }
+
+    /** The newest member list per room, from relay-signed kind:39002 events. */
+    private fun memberLists(events: List<CommunityEvent>): Map<String, ChannelMembers> =
+        events.mapNotNull { ChannelMembers.fromEvent(it) }
+            .groupBy { it.channelId }
+            .mapValues { (_, lists) -> lists.maxBy { it.revisionAt } }
+
+    private fun myRoomIds(events: List<CommunityEvent>): Set<String> =
+        memberLists(events).values.filter { it.contains(me) }.map { it.channelId }.toSet()
+
+    /** The room list from member lists and room metadata, fresh or cached. */
+    private fun roomListFrom(events: List<CommunityEvent>): List<RoomListItem> {
+        val lists = memberLists(events)
+        val mine = lists.values.filter { it.contains(me) }.map { it.channelId }.toSet()
+        val roles = lists.filterKeys { it in mine }.mapValues { (_, list) -> list.roleOf(me) }
+        val metas = events.mapNotNull { CommunityChannel.fromEvent(it) }
+        return buildRoomList(metas, mine, emptyMap(), roles)
     }
 
     /** Reports a step until the first room list is there. */
@@ -359,12 +417,13 @@ class CommunityClient(
             if (missing.isEmpty()) return@launch
             session.state.first { it == SessionState.Ready }
             missing.chunked(100).forEach { chunk ->
-                val found = runCatching { session.query(listOf(CommunityFilters.profiles(chunk))) }
+                val events = runCatching { session.query(listOf(CommunityFilters.profiles(chunk))) }
                     .getOrElse {
                         profilesLock.withLock { requestedProfiles.removeAll(chunk.toSet()) }
                         return@forEach
                     }
-                    .mapNotNull { CommunityProfile.fromEvent(it) }
+                cacheWrite { c -> c.add(CommunityCache.PROFILES, "", events, MAX_CACHED_PROFILES) }
+                val found = events.mapNotNull { CommunityProfile.fromEvent(it) }
                 profilesLock.withLock {
                     val next = _profiles.value.toMutableMap()
                     found.forEach { p -> if ((next[p.pubkey]?.updatedAt ?: -1) < p.updatedAt) next[p.pubkey] = p }
@@ -451,23 +510,44 @@ class CommunityClient(
      * events. Falls back to a plain REQ if the window query fails.
      */
     fun streamTimeline(channelId: String, pageSize: Int = 50, older: Flow<Unit> = emptyFlow()): Flow<StreamTimeline> = callbackFlow {
-        val buffer = TimelineBuffer(channelId, topLevelOnly = true)
+        var buffer = TimelineBuffer(channelId, topLevelOnly = true)
         var state = StreamTimeline()
         fun emit(update: StreamTimeline.() -> StreamTimeline = { this }) {
             state = state.update().copy(messages = buffer.messages(), threads = buffer.threadSummaries())
             trySend(state)
         }
+        // The last messages seen show at once; the first network page then fills in.
+        val cached = cache?.let { c -> cacheRead { c.events(CommunityCache.TIMELINE, channelId, MAX_CACHED_TIMELINE) } }.orEmpty()
+        if (cached.isNotEmpty() && buffer.add(cached)) emit()
         awaitReady()
+        val firstPage = CompletableDeferred<Unit>()
+        // Live events until the first page, to lay over it: the page replaces what the cache showed.
+        val liveBeforePage = ArrayList<CommunityEvent>()
+        // From the first page on the relay decides what is there. The cache only bridged the wait,
+        // and what it had may have been deleted, edited or taken back meanwhile.
+        fun replaceWith(events: List<CommunityEvent>, summaries: List<ThreadSummary>) {
+            buffer = TimelineBuffer(channelId, topLevelOnly = true).apply {
+                add(events)
+                addSummaries(summaries)
+                add(liveBeforePage)
+            }
+            liveBeforePage.clear()
+        }
         // Live first, so nothing falls between the stored page and the live stream.
         val live = launch {
             session.subscribe(listOf(CommunityFilters.streamLive(channelId, clock.nowSeconds() - 2))).collect { item ->
-                if (item is SubscriptionItem.Event && buffer.add(listOf(item.event))) emit()
+                if (item is SubscriptionItem.Event) {
+                    if (!firstPage.isCompleted) liveBeforePage += item.event
+                    if (buffer.add(listOf(item.event))) {
+                        emit()
+                        cacheWrite { it.add(CommunityCache.TIMELINE, channelId, listOf(item.event), MAX_CACHED_TIMELINE) }
+                    }
+                }
                 if (item is SubscriptionItem.Closed) emit { copy(error = item.reason) }
             }
         }
         // Where the next older window page starts; null without window paging.
         var next: WindowCursor? = null
-        val firstPage = CompletableDeferred<Unit>()
         // Older pages one at a time, each from where the last one ended (NIP-CW cursor). Subscribed
         // before the first page, so a request right after it is not lost.
         val olderPages = launch(start = CoroutineStart.UNDISPATCHED) {
@@ -490,14 +570,19 @@ class CommunityClient(
         }
         try {
             val page = api.channelWindow(channelId, null, pageSize, session.relayPubkey)
-            buffer.add(page.rows + page.aux)
-            buffer.addSummaries(page.summaries)
+            replaceWith(page.rows + page.aux, page.summaries)
             next = page.bounds.nextCursor
+            cacheWrite { it.replaceRoom(CommunityCache.TIMELINE, channelId, page.rows + page.aux) }
             emit { copy(loading = false, hasMore = page.bounds.hasMore && next != null, error = null) }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
             runCatching { session.query(listOf(CommunityFilters.streamHistory(channelId))) }
-                .onSuccess { buffer.add(it); emit { copy(loading = false, hasMore = false) } }
+                .onSuccess { history ->
+                    replaceWith(history, emptyList())
+                    cacheWrite { it.replaceRoom(CommunityCache.TIMELINE, channelId, history) }
+                    emit { copy(loading = false, hasMore = false) }
+                }
+                // Offline: what the cache showed stays, with the error.
                 .onFailure { emit { copy(loading = false, error = it.message ?: "loading messages failed") } }
         }
         firstPage.complete(Unit)
@@ -668,6 +753,11 @@ private const val UNREAD_ROOMS_PER_QUERY = 5
 
 /** Live counts from this long before a recount began are kept: the recount may have missed them. */
 private const val LIVE_OVERLAP_SECONDS = 2L
+
+/** What the cache keeps: room list events, profiles, and per room the newest timeline events. */
+private const val MAX_CACHED_ROOM_EVENTS = 2_000
+private const val MAX_CACHED_PROFILES = 2_000
+private const val MAX_CACHED_TIMELINE = 300
 
 /** How long a user action waits for the connection before it gives up. */
 private const val READY_TIMEOUT_MS = 15_000L

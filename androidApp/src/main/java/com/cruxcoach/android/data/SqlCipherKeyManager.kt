@@ -88,6 +88,19 @@ class SqlCipherKeyManager(private val prefs: SharedPreferences) {
         }
     }
 
+    /**
+     * Key for the per-pubkey community cache (#73). Same master key, its own HKDF label,
+     * so it never shares a key with the other databases.
+     */
+    fun getDerivedCommunityKeyForPubkey(pubkeyHex: String): ByteArray {
+        val masterKey = getDecryptedDbKey()
+        try {
+            return hkdfSha256(masterKey, pubkeyHex.toByteArray(), INFO_COMMUNITY_DB, 32)
+        } finally {
+            masterKey.fill(0)
+        }
+    }
+
     private fun getMasterKey() = keyStore.getKey(KEYSTORE_ALIAS, null) as SecretKey
 
     companion object {
@@ -97,6 +110,7 @@ class SqlCipherKeyManager(private val prefs: SharedPreferences) {
         private const val GCM_TAG_LENGTH = 128
         private val INFO_SECURE_DB = "cruxcoach-secure-db".toByteArray()
         private val INFO_ATHLETE_DB = "cruxcoach-athlete-db".toByteArray()
+        private val INFO_COMMUNITY_DB = "cruxcoach-community-db".toByteArray()
 
         init { System.loadLibrary("sqlcipher") }
 

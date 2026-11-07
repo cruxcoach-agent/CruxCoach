@@ -189,6 +189,40 @@ actual class SecureDriverFactory(
     }
 }
 
+actual class CommunityDriverFactory(
+    private val context: Context,
+    private val dbKey: ByteArray
+) {
+    init { require(dbKey.isNotEmpty()) { "Encryption key required" } }
+
+    actual fun createDriver(dbName: String): SqlDriver {
+        val factory = net.zetetic.database.sqlcipher.SupportOpenHelperFactory(dbKey)
+        val driver = AndroidSqliteDriver(
+            schema = com.cruxcoach.db.community.CommunityDatabase.Schema,
+            context = context,
+            name = dbName,
+            factory = factory,
+            // A cache: on a schema change it starts empty instead of migrating.
+            callback = object : AndroidSqliteDriver.Callback(com.cruxcoach.db.community.CommunityDatabase.Schema) {
+                override fun onUpgrade(db: androidx.sqlite.db.SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = recreate(db)
+                override fun onDowngrade(db: androidx.sqlite.db.SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = recreate(db)
+
+                private fun recreate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                    db.execSQL("DROP TABLE IF EXISTS cached_event")
+                    onCreate(db)
+                }
+            },
+        )
+        fun SqlDriver.pragma(stmt: String) {
+            executeQuery(null, stmt, { cursor -> cursor.next(); QueryResult.Value(Unit) }, 0)
+        }
+        driver.pragma("PRAGMA journal_mode = WAL")
+        driver.pragma("PRAGMA cipher_memory_security = OFF")
+        driver.pragma("PRAGMA busy_timeout = 5000")
+        return driver
+    }
+}
+
 actual class AthleteDriverFactory(
     private val context: Context,
     private val dbKey: ByteArray
