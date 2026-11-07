@@ -81,3 +81,27 @@ class MemoryReadStateStore(
         this.state = state
     }
 }
+
+/**
+ * Events kept between runs, so the last room list and recent messages show at once and
+ * offline. Events are stored as the relay sent them; they were verified on arrival.
+ */
+interface CommunityCache {
+    /** The newest [limit] events of [bucket], of one room when [channelId] is set. */
+    suspend fun events(bucket: String, channelId: String?, limit: Int): List<CommunityEvent>
+
+    /** Replaces everything in [bucket] with [events]. */
+    suspend fun replace(bucket: String, events: List<CommunityEvent>)
+
+    /** Adds [events] to one room's part of [bucket], keeping its newest [keep]. */
+    suspend fun add(bucket: String, channelId: String, events: List<CommunityEvent>, keep: Int)
+
+    /** Replaces one room's part of [bucket] with [events]. */
+    suspend fun replaceRoom(bucket: String, channelId: String, events: List<CommunityEvent>)
+
+    companion object {
+        const val ROOMS = "rooms"
+        const val TIMELINE = "timeline"
+        const val PROFILES = "profile"
+    }
+}

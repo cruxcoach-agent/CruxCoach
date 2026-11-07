@@ -1,0 +1,41 @@
+-- Community preview cache (#73). Events are stored as the relay sent them (verified on
+-- arrival) and parsed again on load, so the cache needs no model of its own.
+
+CREATE TABLE cached_event (
+    id TEXT NOT NULL PRIMARY KEY,
+    -- The room the event belongs to; the empty string for events without one (profiles).
+    channel_id TEXT NOT NULL,
+    kind INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    json TEXT NOT NULL,
+    -- Which part of the client stored it: 'rooms', 'timeline', 'profile'.
+    bucket TEXT NOT NULL
+);
+
+CREATE INDEX cached_event_room ON cached_event(bucket, channel_id, created_at);
+
+upsert:
+INSERT OR REPLACE INTO cached_event(id, channel_id, kind, created_at, json, bucket)
+VALUES (?, ?, ?, ?, ?, ?);
+
+byBucket:
+SELECT json FROM cached_event WHERE bucket = ? ORDER BY created_at DESC LIMIT ?;
+
+byRoom:
+SELECT json FROM cached_event WHERE bucket = ? AND channel_id = ? ORDER BY created_at DESC LIMIT ?;
+
+clearBucket:
+DELETE FROM cached_event WHERE bucket = ?;
+
+clearRoom:
+DELETE FROM cached_event WHERE bucket = ? AND channel_id = ?;
+
+-- Keeps the newest :keep events of one room and bucket.
+trimRoom:
+DELETE FROM cached_event
+WHERE bucket = :bucket AND channel_id = :channelId AND id NOT IN (
+    SELECT id FROM cached_event WHERE bucket = :bucket AND channel_id = :channelId ORDER BY created_at DESC LIMIT :keep
+);
+
+clearAll:
+DELETE FROM cached_event;
