@@ -80,10 +80,15 @@ class CommunityMessageActions(
         run { if (mine != null) c.removeReaction(mine) else c.react(message.id, emoji) }
     }
 
-    fun edit(message: CommunityMessage, text: String) {
+    /**
+     * Saves new text for your own message. It keeps the message's mentions and adds the room
+     * members the new text names ([mentions]): with the member list not loaded, or a member
+     * renamed since, the original ones would otherwise be lost in the Buzz phone app.
+     */
+    fun edit(message: CommunityMessage, text: String, mentions: List<String> = emptyList()) {
         val c = client ?: return
         if (text.isBlank() || text.trim() == message.displayContent.trim()) return
-        run { c.editMessage(channelId, message.id, text.trim()) }
+        run { c.editMessage(channelId, message.id, text.trim(), (message.mentions + mentions).distinct(), broadcast = message.isBroadcast) }
     }
 
     fun delete(message: CommunityMessage) {
@@ -135,6 +140,8 @@ fun MessageMenu(
     me: String,
     canModerate: Boolean,
     actions: CommunityMessageActions,
+    /** The room members an edited text mentions, for the edit's `p` tags. */
+    mentionsIn: (String) -> List<String> = { emptyList() },
     onDismiss: () -> Unit,
 ) {
     val clipboard = LocalClipboardManager.current
@@ -175,7 +182,7 @@ fun MessageMenu(
     }
     when (val d = dialog) {
         null -> Unit
-        MenuDialog.Edit -> EditDialog(message.displayContent, onSave = { actions.edit(message, it); onDismiss() }, onDismiss = onDismiss)
+        MenuDialog.Edit -> EditDialog(message.displayContent, onSave = { actions.edit(message, it, mentionsIn(it)); onDismiss() }, onDismiss = onDismiss)
         MenuDialog.Delete -> ConfirmDialog(
             title = stringResource(R.string.community_client_delete_title),
             body = stringResource(R.string.community_client_delete_body),

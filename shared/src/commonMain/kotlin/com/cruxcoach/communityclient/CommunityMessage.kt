@@ -238,6 +238,8 @@ fun applyAux(rows: Collection<CommunityMessage>, aux: Collection<CommunityEvent>
         val mine = reactions[row.id]
         row.copy(
             editedContent = edits[row.id]?.content ?: row.editedContent,
+            // A name added in an edit mentions too; one taken out stays (the Buzz apps differ here).
+            mentions = edits[row.id]?.let { edit -> (row.mentions + edit.tagValues("p").filter { it.isHex(64) }).distinct() } ?: row.mentions,
             isDeleted = row.isDeleted || row.id in deleted,
             reactions = mine?.mapValues { it.value.keys.toSet() } ?: row.reactions,
             reactionIds = mine?.mapValues { (_, byAuthor) -> byAuthor.mapValues { it.value.id } } ?: row.reactionIds,

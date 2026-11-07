@@ -66,7 +66,7 @@ authenticated WebSocket, "HTTP" a NIP-98 request.
 | Reactions | kind 7 with `["e", target]`; the relay derives the room from the target. Custom emoji: NIP-30 `emoji` tags, kind 30030 sets | WS | Subscribe with `#h` to get them live. | shown, not sent |
 | Edits | kind 40003 with `h` and `["e", original]`; author (or the agent's owner) only | WS | Newest edit wins. | shown, not sent |
 | Deletes | kind 5 (own, NIP-09; the relay also lets an agent's owner delete) or kind 9005 (own, or admin). A kind 5 on a reaction takes it back | WS | Hide the target; the relay checks who may delete, so the client trusts every deletion it delivers, as the Buzz apps do. | shown, not sent |
-| Mentions | `["p", key]` notifies (key must be a room member), `["mention", key]` names without notifying | WS | Member picker; the relay rejects `p` for non-members. | — |
+| Mentions | `["p", key]` notifies, `["mention", key]` names without notifying; at most 32. Edits carry the `p` tags of their new text | WS | Member picker; like the Buzz apps, `p` only for room members (the relay itself does not check). | — |
 | Pins, bookmarks, scheduled | kinds 40004, 40005, 40006, reminders 40007 / 30300 (NIP-ER, NIP-44-encrypted to self) | WS | Phase 2. | — |
 | Diffs, room notices | kind 40008; kind 40099 signed by the relay key, content JSON `type` (`member_joined`, `member_left`, `member_removed`, `topic_changed`, `purpose_changed`, `channel_created`, `channel_archived`, `channel_unarchived`), `actor`, `target`, `topic`/`purpose` | WS / HTTP | Show 40099 as a one-line notice; hide unknown types; accept it only from the relay key (it is not in the relay's relay-only list, so the client checks the signer). | ✅ notices, diffs read |
 

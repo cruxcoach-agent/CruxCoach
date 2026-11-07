@@ -9,6 +9,8 @@ import com.cruxcoach.communityclient.CommunityEventTemplates
 import com.cruxcoach.communityclient.CommunityInvite
 import com.cruxcoach.communityclient.CommunityJoin
 import com.cruxcoach.communityclient.CommunityKinds
+import com.cruxcoach.communityclient.MentionCandidate
+import com.cruxcoach.communityclient.Mentions
 import com.cruxcoach.communityclient.ReportTarget
 import com.cruxcoach.communityclient.ReportType
 import com.cruxcoach.communityclient.SessionState
@@ -147,6 +149,16 @@ class CommunityServerIntegrationTest {
             assertAccepted(joiner.removeReaction(thumbs.id))
             withTimeout(30_000) {
                 joiner.streamTimeline(streamId).first { s -> s.messages.firstOrNull { it.id == ownerMessage.id }?.reactions?.isEmpty() == true }
+            }
+
+            // Mentions: the owner names the joiner, a room member, and the message tags them.
+            val members = owner.roomMembers(streamId).map { it.pubkey }.toSet()
+            assertTrue(joiner.me in members, "the joiner is in the room's member list")
+            val greeting = "@CI joiner welcome"
+            val recipients = Mentions.recipients(greeting, listOf(MentionCandidate(joiner.me, "CI joiner")), members)
+            val mentioned = owner.sendMessage(streamId, greeting, mentions = recipients).also { assertAccepted(it) }.event
+            withTimeout(30_000) {
+                joiner.streamTimeline(streamId).first { s -> s.messages.firstOrNull { it.id == mentioned.id }?.mentions == listOf(joiner.me) }
             }
 
             // Edit and delete your own message; the room owner removes someone else's; a report is taken.
