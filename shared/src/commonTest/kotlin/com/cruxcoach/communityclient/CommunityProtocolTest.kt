@@ -50,6 +50,11 @@ class CommunityProtocolTest {
             """{"kinds":[9,40002,45001,45003],"ids":["${id(10)}"],"#h":["$CHANNEL"],"limit":1}""",
             CommunityFilters.threadRoot(CHANNEL, id(10)).toJson(),
         )
+        // Older thread replies page with the relay's composite REQ cursor, so a busy second is not skipped.
+        val older = CommunityFilters.thread(CHANNEL, id(10), CommunityFilters.THREAD_OLDER_PAGE, before = WindowCursor(1_751_499_000, id(11))).toJson()
+        assertTrue(""""until":1751499000""" in older && """"before_id":"${id(11)}"""" in older && """"limit":200""" in older, older)
+        val first = CommunityFilters.thread(CHANNEL, id(10)).toJson()
+        assertFalse("until" in first || "before_id" in first)
     }
 
     @Test

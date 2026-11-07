@@ -126,11 +126,20 @@ object CommunityFilters {
     )
 
     /** All replies under one thread root plus the root's own aux events, history and live. */
-    fun thread(channelId: String, rootId: String): RelayFilter = RelayFilter(
+    fun thread(channelId: String, rootId: String, limit: Int = THREAD_PAGE, before: WindowCursor? = null): RelayFilter = RelayFilter(
         kinds = listOf(CommunityKinds.STREAM_MESSAGE, CommunityKinds.STREAM_MESSAGE_V2, CommunityKinds.FORUM_COMMENT) + CommunityKinds.AUX,
         tags = mapOf('h' to listOf(channelId), 'e' to listOf(rootId)),
-        limit = 500,
+        until = before?.createdAt,
+        limit = limit,
+        // The relay's composite REQ cursor: older than [before] in its order (newest first, then id).
+        extensions = before?.let { mapOf("before_id" to JsonPrimitive(it.id)) }.orEmpty(),
     )
+
+    /** Events a thread loads first; a full first page means older replies may exist. */
+    const val THREAD_PAGE = 500
+
+    /** Events per page of older thread replies. */
+    const val THREAD_OLDER_PAGE = 200
 
     /** Edits, deletions and reactions of the given messages (they tag only the message they change). */
     fun auxFor(channelId: String, ids: List<String>): RelayFilter = RelayFilter(

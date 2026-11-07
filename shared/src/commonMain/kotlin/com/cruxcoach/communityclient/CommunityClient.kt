@@ -1,6 +1,8 @@
 package com.cruxcoach.communityclient
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.awaitClose
@@ -14,6 +16,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filter
@@ -283,7 +286,7 @@ class CommunityClient(
      * A stream room: the newest top-level rows from the NIP-CW window, then live
      * events. Falls back to a plain REQ if the window query fails.
      */
-    fun streamTimeline(channelId: String, pageSize: Int = 50): Flow<StreamTimeline> = callbackFlow {
+    fun streamTimeline(channelId: String, pageSize: Int = 50, older: Flow<Unit> = emptyFlow()): Flow<StreamTimeline> = callbackFlow {
         val buffer = TimelineBuffer(channelId, topLevelOnly = true)
         var state = StreamTimeline()
         fun emit(update: StreamTimeline.() -> StreamTimeline = { this }) {
@@ -298,18 +301,43 @@ class CommunityClient(
                 if (item is SubscriptionItem.Closed) emit { copy(error = item.reason) }
             }
         }
+        // Where the next older window page starts; null without window paging.
+        var next: WindowCursor? = null
+        val firstPage = CompletableDeferred<Unit>()
+        // Older pages one at a time, each from where the last one ended (NIP-CW cursor). Subscribed
+        // before the first page, so a request right after it is not lost.
+        val olderPages = launch(start = CoroutineStart.UNDISPATCHED) {
+            older.collect {
+                firstPage.await()
+                val cursor = next
+                if (cursor == null || !state.hasMore || state.loadingOlder) return@collect
+                emit { copy(loadingOlder = true) }
+                try {
+                    val page = api.channelWindow(channelId, cursor, pageSize, session.relayPubkey)
+                    buffer.add(page.rows + page.aux)
+                    buffer.addSummaries(page.summaries)
+                    next = page.bounds.nextCursor
+                    emit { copy(loadingOlder = false, hasMore = page.bounds.hasMore && next != null, error = null) }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
+                    emit { copy(loadingOlder = false, error = e.message ?: "loading older messages failed") }
+                }
+            }
+        }
         try {
             val page = api.channelWindow(channelId, null, pageSize, session.relayPubkey)
             buffer.add(page.rows + page.aux)
             buffer.addSummaries(page.summaries)
-            emit { copy(loading = false, hasMore = page.bounds.hasMore, error = null) }
+            next = page.bounds.nextCursor
+            emit { copy(loading = false, hasMore = page.bounds.hasMore && next != null, error = null) }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
             runCatching { session.query(listOf(CommunityFilters.streamHistory(channelId))) }
                 .onSuccess { buffer.add(it); emit { copy(loading = false, hasMore = false) } }
                 .onFailure { emit { copy(loading = false, error = it.message ?: "loading messages failed") } }
         }
-        awaitClose { live.cancel() }
+        firstPage.complete(Unit)
+        awaitClose { live.cancel(); olderPages.cancel() }
     }.conflate()
 
     /**
@@ -319,19 +347,69 @@ class CommunityClient(
      * deletions and reactions of a reply tag only that reply, so they come from a
      * lookup by the replies' ids and from the room's live aux stream.
      */
-    fun thread(channelId: String, rootId: String): Flow<ThreadView> = channelFlow {
+    fun thread(channelId: String, rootId: String, older: Flow<Unit> = emptyFlow()): Flow<ThreadView> = channelFlow {
         awaitReady()
         val buffer = TimelineBuffer(channelId, topLevelOnly = false)
         val lock = Mutex()
         var repliesLoaded = false
         var rootLoaded = false
         var error: String? = null
+        var firstPageEvents = 0
+        var firstPageDone = false
+        var hasOlder = false
+        // The last event the thread filter returned in the relay's order (oldest first by time, then
+        // the highest id in that second), replies and the root's aux alike: the paging cursor.
+        var cursor: WindowCursor? = null
+        fun moveCursor(event: CommunityEvent) {
+            val c = cursor
+            if (c == null || event.createdAt < c.createdAt || (event.createdAt == c.createdAt && event.id > c.id)) {
+                cursor = WindowCursor(event.createdAt, event.id)
+            }
+        }
+        var loadingOlder = false
         suspend fun update(change: () -> Boolean) = lock.withLock {
             // First show waits for the head too (it has its own short timeout), so it does not jump in later.
             if (change() && repliesLoaded && rootLoaded) {
                 // Every row of the reply subscription tags the root, so all but the root are replies.
                 val all = buffer.messages()
-                send(ThreadView(all.firstOrNull { it.id == rootId }, all.filter { it.id != rootId }, loading = !rootLoaded, error = error))
+                send(
+                    ThreadView(
+                        all.firstOrNull { it.id == rootId }, all.filter { it.id != rootId },
+                        loading = !rootLoaded, hasOlder = hasOlder, loadingOlder = loadingOlder, error = error,
+                    ),
+                )
+            }
+        }
+        // Edits, deletions and reactions of replies tag only the reply, so they come by the replies' ids.
+        suspend fun auxOf(messageIds: Collection<String>) {
+            val ids = messageIds.filter { it != rootId }
+            if (ids.isEmpty()) return
+            val aux = try {
+                ids.chunked(AUX_LOOKUP_CHUNK).flatMap { session.query(listOf(CommunityFilters.auxFor(channelId, it))) }
+            } catch (e: CommunityException) {
+                emptyList()
+            }
+            update { buffer.add(aux) }
+        }
+        launch(start = CoroutineStart.UNDISPATCHED) {
+            older.collect {
+                val before = lock.withLock { if (!hasOlder || loadingOlder) null else cursor } ?: return@collect
+                update { loadingOlder = true; true }
+                val page = try {
+                    session.query(listOf(CommunityFilters.thread(channelId, rootId, CommunityFilters.THREAD_OLDER_PAGE, before = before)))
+                } catch (e: CommunityException) {
+                    update { loadingOlder = false; error = e.message; true }
+                    return@collect
+                }
+                // The composite cursor always moves, so a full page may have more behind it.
+                update {
+                    buffer.add(page)
+                    page.forEach(::moveCursor)
+                    hasOlder = page.size >= CommunityFilters.THREAD_OLDER_PAGE
+                    loadingOlder = false
+                    true
+                }
+                auxOf(page.filter { it.kind !in CommunityKinds.AUX }.map { it.id })
             }
         }
         launch {
@@ -349,18 +427,24 @@ class CommunityClient(
         }
         session.subscribe(listOf(CommunityFilters.thread(channelId, rootId))).collect { item ->
             when (item) {
-                is SubscriptionItem.Event -> update { buffer.add(listOf(item.event)) }
-                SubscriptionItem.Eose -> {
-                    update { repliesLoaded = true; true }
-                    val ids = lock.withLock { buffer.messages().map { it.id }.filter { it != rootId } }
-                    if (ids.isNotEmpty()) launch {
-                        val aux = try {
-                            ids.chunked(AUX_LOOKUP_CHUNK).flatMap { session.query(listOf(CommunityFilters.auxFor(channelId, it))) }
-                        } catch (e: CommunityException) {
-                            emptyList()
-                        }
-                        update { buffer.add(aux) }
+                is SubscriptionItem.Event -> update {
+                    if (!firstPageDone) {
+                        firstPageEvents++
+                        moveCursor(item.event)
                     }
+                    buffer.add(listOf(item.event))
+                }
+                SubscriptionItem.Eose -> {
+                    // Only the first page decides about older replies: after a reconnect the relay sends
+                    // the newest page again, which says nothing about how far paging already got.
+                    update {
+                        repliesLoaded = true
+                        if (!firstPageDone) hasOlder = firstPageEvents >= CommunityFilters.THREAD_PAGE
+                        firstPageDone = true
+                        true
+                    }
+                    val ids = lock.withLock { buffer.messages().map { it.id } }
+                    launch { auxOf(ids) }
                 }
                 is SubscriptionItem.Closed -> update { repliesLoaded = true; error = item.reason; true }
             }
