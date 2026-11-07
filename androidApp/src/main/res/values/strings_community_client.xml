@@ -142,4 +142,8 @@
     <string name="community_client_report_malware">Malware or a scam link</string>
     <string name="community_client_report_other">Something else</string>
     <string name="community_client_older_replies">Show earlier replies</string>
+    <plurals name="community_client_unread">
+        <item quantity="one">%s new message</item>
+        <item quantity="other">%s new messages</item>
+    </plurals>
 </resources>

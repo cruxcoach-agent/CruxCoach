@@ -74,6 +74,8 @@ data class CommunityHomeState(
     val joinRoomError: PublishError? = null,
     /** Just joined: ask for the name people see. */
     val askName: Boolean = false,
+    /** Room id → new messages since the user last read it. */
+    val unread: Map<String, Long> = emptyMap(),
     /** The user's display name on the community, if set. */
     val myName: String? = null,
     val name: NameEdit = NameEdit(),
@@ -112,8 +114,9 @@ class CommunityHomeViewModel @Inject constructor(
             combine(join, nameEdit) { step, name -> base.copy(join = step, name = name) }
         } else {
             client.requestProfiles(listOf(client.me))
-            combine(client.session.state, client.rooms, joinRoomError, client.profiles, nameEdit) { session, rooms, joinError, profiles, name ->
-                base.copy(session = session, rooms = rooms, joinRoomError = joinError, myName = profiles[client.me]?.label, name = name)
+            val roomsAndUnread = combine(client.rooms, client.unread) { rooms, unread -> rooms to unread }
+            combine(client.session.state, roomsAndUnread, joinRoomError, client.profiles, nameEdit) { session, (rooms, unread), joinError, profiles, name ->
+                base.copy(session = session, rooms = rooms, unread = unread, joinRoomError = joinError, myName = profiles[client.me]?.label, name = name)
             }
         }
     }.stateIn(
@@ -270,7 +273,27 @@ class CommunityRoomViewModel @Inject constructor(
     }
 
     init {
-        client?.let { c -> viewModelScope.launch { local.value = local.value.copy(members = loadMembers(c, channelId)) } }
+        client?.let { c ->
+            c.roomOpened(channelId)
+            viewModelScope.launch { local.value = local.value.copy(members = loadMembers(c, channelId)) }
+        }
+    }
+
+    override fun onCleared() {
+        client?.roomClosed(channelId)
+    }
+
+    /**
+     * The room's timeline on screen counts as read up to its newest top-level message (in a
+     * forum: topic or comment). Thread replies are not covered: they are read in their thread.
+     */
+    private fun markRead(c: CommunityClient, stream: StreamTimeline, forum: ForumView) {
+        val newest = if (isForum) {
+            forum.newestAt.takeIf { !forum.loading }
+        } else {
+            stream.messages.maxOfOrNull { it.createdAt }.takeIf { !stream.loading }
+        }
+        newest?.let { c.markRead(channelId, it) }
     }
 
     val state: StateFlow<CommunityRoomState> = run {
@@ -279,7 +302,7 @@ class CommunityRoomViewModel @Inject constructor(
         val content: Flow<Pair<StreamTimeline, ForumView>> =
             if (isForum) c.forum(channelId).map { StreamTimeline(loading = false) to it }
             else c.streamTimeline(channelId, older = olderRequests).map { it to ForumView(loading = false) }
-        combine(content.onEach { (s, f) -> requestAuthors(c, s, f) }, room, c.profiles, local, actions.feedback) { (s, f), item, profiles, l, feedback ->
+        combine(content.onEach { (s, f) -> requestAuthors(c, s, f); markRead(c, s, f) }, room, c.profiles, local, actions.feedback) { (s, f), item, profiles, l, feedback ->
             l.copy(room = item, stream = s, forum = f, profiles = profiles, feedback = feedback)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), local.value)
     }
@@ -357,7 +380,11 @@ class CommunityThreadViewModel @Inject constructor(
         val c = client ?: return@run local.asStateFlow()
         val room = c.rooms.map { s -> s.rooms.firstOrNull { it.channel.id == channelId } }.distinctUntilChanged()
         combine(
-            c.thread(channelId, rootId, older = olderRequests).onEach { t -> c.requestProfiles(listOfNotNull(t.root?.author) + t.replies.map { it.author }) },
+            c.thread(channelId, rootId, older = olderRequests).onEach { t ->
+                c.requestProfiles(listOfNotNull(t.root?.author) + t.replies.map { it.author })
+                // The replies (in a forum: comments) on screen are read, as the Buzz apps mark a thread they show.
+                if (!t.loading) t.replies.maxOfOrNull { it.createdAt }?.let { c.markThreadRead(rootId, it) }
+            },
             room,
             c.profiles,
             local,

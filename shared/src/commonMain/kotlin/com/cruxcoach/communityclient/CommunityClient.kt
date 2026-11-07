@@ -5,22 +5,28 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -51,9 +57,35 @@ class CommunityClient(
     private val elapsedMillis: () -> Long = { clock.nowSeconds() * 1000 },
     /** Steps to the first room list, with milliseconds since [start] (diagnostics only). */
     private val onTiming: (step: String, millis: Long) -> Unit = { _, _ -> },
+    /** Encrypts the read state to the user's own key; without it, read state stays on this device. */
+    cipher: SelfCipher? = null,
+    readStore: ReadStateStore = MemoryReadStateStore(),
 ) {
     val session = CommunitySession(endpoint, socketFactory, signer, verifier, clock, scope)
     val api = CommunityApi(endpoint, http, signer, verifier, clock)
+
+    /** How far the user has read in each room, synced across their devices. */
+    val readState = ReadStateSync(session, signer.pubkey, cipher, readStore, clock, scope)
+
+    // Room id → unread message id → the message. Ids keep live counting idempotent (a
+    // resubscription after a reconnect delivers stored events again), and each read mark
+    // clears exactly the messages it covers.
+    private val unreadIds = MutableStateFlow<Map<String, Map<String, UnreadRules.Item>>>(emptyMap())
+
+    /** Threads the user started or answered: replies there count as unread ([UnreadRules]). */
+    private val myThreads = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * Room id → unread messages by others (member rooms only), as the Buzz phone app counts
+     * them: top-level messages and topics, mentions of the user, broadcasts, and replies in
+     * the user's threads. At most [UNREAD_LIMIT] per room.
+     */
+    val unread: StateFlow<Map<String, Long>> = unreadIds
+        .map { rooms -> rooms.mapValues { (_, items) -> items.size.toLong() } }
+        .stateIn(scope, SharingStarted.Eagerly, emptyMap())
+
+    /** Rooms on screen: new messages there are read, not counted. */
+    private val openRooms = MutableStateFlow<Set<String>>(emptySet())
 
     val me: String get() = signer.pubkey
 
@@ -101,8 +133,139 @@ class CommunityClient(
                 session.subscribe(listOf(CommunityFilters.myMembershipNotices(me, clock.nowSeconds())))
                     .collect { item -> if (item is SubscriptionItem.Event) refreshRooms() }
             }
+            launch {
+                awaitReady()
+                readState.follow()
+            }
+            // Marks from here or another device clear the messages they read.
+            launch {
+                readState.readAt.collect { marks -> unreadIds.update { all -> all.readAgainst(marks) } }
+            }
+            // New messages in my rooms count up live, wherever the user is in the app.
+            launch {
+                awaitReady()
+                _rooms.map { s -> s.rooms.filter { it.isMember }.map { it.channel.id }.toSet() }
+                    .distinctUntilChanged()
+                    .collectLatest { mine ->
+                        if (mine.isEmpty()) return@collectLatest
+                        val kinds = UnreadRules.KINDS + CommunityKinds.DELETION + CommunityKinds.GROUP_DELETE_EVENT
+                        val filter = RelayFilter(kinds = kinds, tags = mapOf('h' to mine.toList()), since = clock.nowSeconds())
+                        session.subscribe(listOf(filter)).collect { item ->
+                            val event = (item as? SubscriptionItem.Event)?.event ?: return@collect
+                            if (event.kind == CommunityKinds.DELETION || event.kind == CommunityKinds.GROUP_DELETE_EVENT) {
+                                // A deleted message no longer counts (the relay checked who may delete it).
+                                val gone = event.tagValues("e").toSet()
+                                unreadIds.update { all -> all.mapValues { (_, items) -> items - gone } }
+                                return@collect
+                            }
+                            val room = event.channelId?.takeIf { it in mine } ?: return@collect
+                            myThreads.update { it + UnreadRules.threadsOf(listOf(event), me) }
+                            val unreadItem = UnreadRules.item(event, me, myThreads.value) ?: return@collect
+                            // An open room shows its timeline, not the replies inside its threads.
+                            if (room in openRooms.value && !unreadItem.inThread) return@collect
+                            unreadIds.update { all ->
+                                if (!UnreadRules.isUnread(unreadItem, room, readState.readAt.value)) all
+                                else all + (room to (all[room].orEmpty() + (unreadItem.id to unreadItem)).newest())
+                            }
+                        }
+                    }
+            }
         }
     }
+
+    /** A room screen opened: its new messages are read as they come. */
+    fun roomOpened(channelId: String) {
+        openRooms.value = openRooms.value + channelId
+    }
+
+    fun roomClosed(channelId: String) {
+        openRooms.value = openRooms.value - channelId
+    }
+
+    /**
+     * The user read [channelId]'s timeline up to [at], the newest top-level message (in a forum:
+     * topic or comment) on screen. Written as the Buzz phone app's catch-up mark and as the room
+     * mark, which the Buzz desktop app reads. The room mark reads everything older, so it stops
+     * before the first unread reply that shows only inside a thread: opening the room does not
+     * read those. Never past now: one message dated ahead must not mark the next minutes read
+     * on every device.
+     */
+    fun markRead(channelId: String, at: Long) {
+        val upTo = minOf(at, clock.nowSeconds())
+        val firstInThread = unreadIds.value[channelId]?.values?.filter { it.inThread }?.minOfOrNull { it.createdAt }
+        mark(mapOf(ReadStateBlob.activityKey(channelId) to upTo, channelId to minOf(upTo, (firstInThread ?: Long.MAX_VALUE) - 1)))
+    }
+
+    /** The user read a thread's replies up to [at]: `thread:<root>` (NIP-RS) and the phone app's `thread-activity:<root>`. */
+    fun markThreadRead(rootId: String, at: Long) {
+        val upTo = minOf(at, clock.nowSeconds())
+        mark(mapOf(ReadStateBlob.threadKey(rootId) to upTo, ReadStateBlob.threadActivityKey(rootId) to upTo))
+    }
+
+    private fun mark(marks: Map<String, Long>) {
+        marks.forEach { (key, at) -> readState.markRead(listOf(key), at) }
+        // Cleared at once, not only when the stored marks catch up.
+        val now = readState.readAt.value
+        val next = now + marks.mapValues { (key, at) -> maxOf(at, now[key] ?: -1) }
+        unreadIds.update { all -> all.readAgainst(next) }
+    }
+
+    /**
+     * Loads, per member room, the messages by others since its room mark (a room never read
+     * looks back 7 days, as NIP-RS treats unknown as unread), and which threads the user is in.
+     * Over HTTP like the Buzz phone app's batch: a large answer on the socket could fill the
+     * relay's send buffer for this connection and hold up the live events.
+     */
+    suspend fun refreshUnread() {
+        val rooms = _rooms.value.rooms.filter { it.isMember }
+        if (rooms.isEmpty()) return
+        val startedAt = clock.nowSeconds()
+        val floor = startedAt - ReadStateBlob.HORIZON_SECONDS
+        val roomIds = rooms.map { it.channel.id }
+        suspend fun query(filters: List<RelayFilter>): List<CommunityEvent>? = try {
+            api.query(filters)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+        val found = coroutineScope {
+            val mine = async {
+                query(listOf(RelayFilter(kinds = UnreadRules.KINDS, authors = listOf(me), tags = mapOf('h' to roomIds), since = floor, limit = UNREAD_QUERY_LIMIT))).orEmpty()
+            }
+            val perRoom = rooms.chunked(UNREAD_ROOMS_PER_QUERY).map { chunk ->
+                async {
+                    val filters = chunk.map { room ->
+                        // Only the room mark reads everything older; the narrower marks are checked per message.
+                        val since = maxOf(floor, (readState.readAt.value[room.channel.id] ?: floor) + 1)
+                        RelayFilter(kinds = unreadKinds(room.channel.type), tags = mapOf('h' to listOf(room.channel.id)), since = since, limit = UNREAD_QUERY_LIMIT)
+                    }
+                    val events = query(filters) ?: return@async emptyList()
+                    val byRoom = events.groupBy { it.channelId }
+                    chunk.map { room -> room.channel.id to byRoom[room.channel.id].orEmpty() }
+                }
+            }.awaitAll().flatten()
+            myThreads.update { it + UnreadRules.threadsOf(mine.await() + perRoom.flatMap { (_, events) -> events }, me) }
+            perRoom.map { (id, events) -> id to events.mapNotNull { UnreadRules.item(it, me, myThreads.value) } }
+        }
+        // Each answered room gets what the relay has now (a message deleted since is gone), plus what
+        // was counted live while the queries ran; then all is checked against the marks of now, not
+        // of when the queries left, so a room read meanwhile stays read.
+        unreadIds.update { all ->
+            val counted = all + found.associate { (id, items) ->
+                val fresh = items.filter { id !in openRooms.value || it.inThread }.associateBy { it.id }
+                val liveSince = all[id].orEmpty().filterValues { it.createdAt >= startedAt - LIVE_OVERLAP_SECONDS }
+                id to (fresh + liveSince).newest()
+            }
+            counted.readAgainst(readState.readAt.value)
+        }
+    }
+
+    private fun Map<String, Map<String, UnreadRules.Item>>.readAgainst(marks: Map<String, Long>): Map<String, Map<String, UnreadRules.Item>> =
+        mapValues { (room, items) -> items.filterValues { UnreadRules.isUnread(it, room, marks) } }
+
+    private fun Map<String, UnreadRules.Item>.newest(): Map<String, UnreadRules.Item> =
+        if (size <= UNREAD_LIMIT) this else values.sortedByDescending { it.createdAt }.take(UNREAD_LIMIT).associateBy { it.id }
 
     /** Ends the client for good: the socket closes and the session's coroutine ends. */
     fun stop() {
@@ -146,6 +309,7 @@ class CommunityClient(
     suspend fun refreshRooms() {
         awaitReady()
         roomsLock.withLock { loadRooms() }
+        refreshUnread()
     }
 
     private suspend fun loadRooms() {
@@ -458,10 +622,12 @@ class CommunityClient(
         awaitReady()
         val posts = LinkedHashMap<String, CommunityEvent>()
         val comments = HashMap<String, MutableSet<String>>()
+        var newestCommentAt: Long? = null
         var loaded = false
         fun emit(error: String? = null) {
             val list = posts.values.mapNotNull { CommunityMessage.fromEvent(it) }.sortedByDescending { it.createdAt }
-            trySend(ForumView(list, comments.mapValues { it.value.size }, loading = !loaded, error = error))
+            val newest = listOfNotNull(list.firstOrNull()?.createdAt, newestCommentAt).maxOrNull()
+            trySend(ForumView(list, comments.mapValues { it.value.size }, newestAt = newest, loading = !loaded, error = error))
         }
         val postsJob = launch {
             session.subscribe(listOf(CommunityFilters.forumPosts(channelId))).collect { item ->
@@ -477,6 +643,7 @@ class CommunityClient(
             session.subscribe(listOf(filter)).filter { it is SubscriptionItem.Event }.collect { item ->
                 val event = (item as SubscriptionItem.Event).event
                 val parent = ThreadRef.of(event)?.rootId ?: return@collect
+                newestCommentAt = maxOf(newestCommentAt ?: 0, event.createdAt)
                 if (comments.getOrPut(parent) { HashSet() }.add(event.id) && loaded) emit()
             }
         }
@@ -486,6 +653,23 @@ class CommunityClient(
 
 /** How long a thread waits for its head before showing the replies without it. */
 private const val ROOT_LOOKUP_TIMEOUT_MS = 8_000L
+
+/** The message kinds of a stream room and of a forum. */
+private fun unreadKinds(type: ChannelType): List<Int> =
+    if (type == ChannelType.FORUM) listOf(CommunityKinds.FORUM_POST, CommunityKinds.FORUM_COMMENT)
+    else listOf(CommunityKinds.STREAM_MESSAGE, CommunityKinds.STREAM_MESSAGE_V2)
+
+/** The most unread messages kept per room; the badge shows "99+" above 99. */
+private const val UNREAD_LIMIT = 100
+
+/** Messages fetched per room for counting: replies come too and only some count (the Buzz phone app's limit). */
+private const val UNREAD_QUERY_LIMIT = 1_000
+
+/** Rooms per unread query, to keep one HTTP answer small. */
+private const val UNREAD_ROOMS_PER_QUERY = 5
+
+/** Live counts from this long before a recount began are kept: the recount may have missed them. */
+private const val LIVE_OVERLAP_SECONDS = 2L
 
 /** How long a user action waits for the connection before it gives up. */
 private const val READY_TIMEOUT_MS = 15_000L

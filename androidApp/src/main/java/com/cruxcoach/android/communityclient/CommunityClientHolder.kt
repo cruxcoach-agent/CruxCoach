@@ -1,6 +1,7 @@
 package com.cruxcoach.android.communityclient
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -17,6 +18,9 @@ import com.cruxcoach.communityclient.CommunityEvent
 import com.cruxcoach.communityclient.CommunityJoin
 import com.cruxcoach.communityclient.CommunityProfile
 import com.cruxcoach.communityclient.ProfileBase
+import com.cruxcoach.communityclient.ReadStateBlob
+import com.cruxcoach.communityclient.ReadStateStore
+import com.cruxcoach.communityclient.StoredReadState
 import com.cruxcoach.communityclient.UnixClock
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
@@ -33,6 +37,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import okhttp3.OkHttpClient
 import javax.inject.Inject
 import javax.inject.Named
@@ -186,6 +199,13 @@ class CommunityClientHolder @Inject constructor(
         val key = endpoint to signer.pubkey
         if (clientKey != key) {
             closeClient()
+            // Signing and decrypting stay with the key the client is for: after a switch it refuses
+            // until client() builds the next one, so nothing this device keeps for one key
+            // reaches another key's events or files.
+            val pubkey = key.second
+            val boundSigner = {
+                nostrSigner.signer.also { check(it.pubKey == pubkey) { "the signing key changed" } }
+            }
             // Its own scope, so closing the client ends everything it started.
             val ownScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             clientScope = ownScope
@@ -193,12 +213,14 @@ class CommunityClientHolder @Inject constructor(
                 endpoint = endpoint,
                 socketFactory = sockets,
                 http = http,
-                signer = signer,
+                signer = QuartzCommunitySigner(signer = boundSigner, publicKey = { pubkey }),
                 verifier = QuartzEventVerifier,
                 clock = clock,
                 scope = ownScope,
                 elapsedMillis = { SystemClock.elapsedRealtime() },
                 onTiming = { step, millis -> Log.i(TAG, "event=timing step=$step ms=$millis") },
+                cipher = QuartzSelfCipher(signer = boundSigner, publicKey = { pubkey }),
+                readStore = PrefsReadStateStore(prefs, "$KEY_READ_STATE_PREFIX${key.second}@${endpoint.host}"),
             ).also { started ->
                 started.start()
                 if (!foreground) schedulePause(started)
@@ -260,5 +282,31 @@ class CommunityClientHolder @Inject constructor(
         private const val KEY_SECURE = "secure"
         private const val KEY_JOINED_PUBKEY = "joined_pubkey"
         private const val KEY_ASK_NAME_PUBKEY = "ask_name_pubkey"
+        private const val KEY_READ_STATE_PREFIX = "read_state:"
+    }
+}
+
+/**
+ * Read state in the feature's own preferences file, one entry per key and community: the
+ * NIP-RS installation ids and the read time per room. No database migration.
+ */
+internal class PrefsReadStateStore(private val prefs: SharedPreferences, private val key: String) : ReadStateStore {
+    override fun load(): StoredReadState {
+        val obj = prefs.getString(key, null)?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() }
+        val clientId = obj?.get("client_id")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() }
+        val slotId = obj?.get("slot_id")?.jsonPrimitive?.contentOrNull?.takeIf { ReadStateBlob.isSlotId(it) }
+        val contexts = (obj?.get("contexts") as? JsonObject)?.mapNotNull { (k, v) -> v.jsonPrimitive.longOrNull?.let { k to it } }?.toMap().orEmpty()
+        val state = StoredReadState(clientId ?: ReadStateBlob.newSlotId(), slotId ?: ReadStateBlob.newSlotId(), contexts)
+        if (clientId == null || slotId == null) save(state)
+        return state
+    }
+
+    override fun save(state: StoredReadState) {
+        val json = buildJsonObject {
+            put("client_id", state.clientId)
+            put("slot_id", state.slotId)
+            putJsonObject("contexts") { state.contexts.forEach { (k, v) -> put(k, v) } }
+        }
+        prefs.edit().putString(key, json.toString()).apply()
     }
 }

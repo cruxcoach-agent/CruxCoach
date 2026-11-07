@@ -101,6 +101,8 @@ data class ThreadView(
 data class ForumView(
     val posts: List<CommunityMessage> = emptyList(),
     val commentCounts: Map<String, Int> = emptyMap(),
+    /** Time of the newest topic or comment, for the read state. */
+    val newestAt: Long? = null,
     val loading: Boolean = true,
     val error: String? = null,
 )

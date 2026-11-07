@@ -142,4 +142,8 @@
     <string name="community_client_report_malware">Schadsoftware oder ein Betrugslink</string>
     <string name="community_client_report_other">Etwas anderes</string>
     <string name="community_client_older_replies">Frühere Antworten anzeigen</string>
+    <plurals name="community_client_unread">
+        <item quantity="one">%s neue Nachricht</item>
+        <item quantity="other">%s neue Nachrichten</item>
+    </plurals>
 </resources>

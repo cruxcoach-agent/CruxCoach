@@ -61,6 +61,7 @@ data class UnsignedEvent(
 /** Event kinds the community client reads or writes. Values from the Buzz relay at the pinned version. */
 object CommunityKinds {
     const val PROFILE = 0
+    const val APP_DATA = 30078
     const val DELETION = 5
     const val REACTION = 7
     const val STREAM_MESSAGE = 9

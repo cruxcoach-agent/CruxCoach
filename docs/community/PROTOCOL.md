@@ -91,7 +91,7 @@ authenticated WebSocket, "HTTP" a NIP-98 request.
 | Presence | kind 20001 (ephemeral, `online`/`away`/`offline`), owner-for-agents 20003, snapshot 40902 | WS | Optional. | — |
 | Typing | kind 20002 (ephemeral) | WS | Optional. | — |
 | Status | kind 30315 (NIP-38) | WS | Optional. | — |
-| Unread state | Local last-read per room; cross-device sync with NIP-RS kind 30078 `d=read-state…`, `t=read-state`, content NIP-44-encrypted to self | WS | NIP-44 via Amber or the local key. | — |
+| Unread state | NIP-RS kind 30078 `d=read-state:<slot>`, `t=read-state`, NIP-44 to self, one per installation. Marks: `<room>`, `thread:<root>`, `msg:<id>` (desktop), plus the phone app's catch-up marks `activity:<room>` and `thread-activity:<root>`. The phone app counts top-level messages, mentions, broadcasts and replies in your threads. | WS (+ HTTP to count) | Write both apps' marks; the room mark never past an unread reply inside a thread. NIP-44 via Amber or the local key. | ✅ |
 | Agents | NIP-OA `auth` tag in kind 0, agent profiles kind 10100, personas 30175, managed agents 30177, job kinds 43001–43006, agent presence 20003 | WS | Show badges and job progress rows. | — |
 | Huddles | kinds 48100–48106 (lifecycle, guidelines), reactions 24810, audio over WebSocket `/huddle/<room>/audio` | WS | Own audio stack; phase 4. | — |
 | Push | NIP-PL push leases (kind 30350) registered with the relay; delivery through a push gateway that serves **APNs only**. The Android phone app has no push at `d676c7b`. | WS | UnifiedPush needs a small gateway next to the relay (phase 3). | — |

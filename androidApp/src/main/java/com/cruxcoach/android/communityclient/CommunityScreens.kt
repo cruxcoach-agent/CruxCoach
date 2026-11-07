@@ -62,6 +62,8 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
@@ -398,11 +400,11 @@ private fun RoomListPane(
     LazyColumn(Modifier.fillMaxSize().testTag("community_room_list"), contentPadding = PaddingValues(vertical = 8.dp)) {
         if (streams.isNotEmpty()) {
             item { SectionHeader(stringResource(R.string.community_client_section_rooms)) }
-            items(streams, key = { it.channel.id }) { RoomRow(it, onOpenRoom, onJoin) }
+            items(streams, key = { it.channel.id }) { RoomRow(it, state.unread[it.channel.id] ?: 0, onOpenRoom, onJoin) }
         }
         if (forums.isNotEmpty()) {
             item { SectionHeader(stringResource(R.string.community_client_section_forums)) }
-            items(forums, key = { it.channel.id }) { RoomRow(it, onOpenRoom, onJoin) }
+            items(forums, key = { it.channel.id }) { RoomRow(it, state.unread[it.channel.id] ?: 0, onOpenRoom, onJoin) }
         }
         if (rooms.rooms.isEmpty()) {
             // Loading, empty or failed (also while offline): below it the name and key as with rooms.
@@ -438,6 +440,20 @@ private fun RoomListPane(
     }
 }
 
+/** The number of new messages in a room, "99+" above that. */
+@Composable
+private fun UnreadBadge(count: Long) {
+    val label = if (count > 99) "99+" else count.toString()
+    val description = pluralStringResource(R.plurals.community_client_unread, count.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(), label)
+    Box(
+        Modifier.background(OrangeAccent, RoundedCornerShape(12.dp)).padding(horizontal = 8.dp, vertical = 2.dp)
+            .semantics { contentDescription = description },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = Color.Black, fontWeight = FontWeight.Bold)
+    }
+}
+
 @Composable
 private fun SectionHeader(text: String) {
     Text(
@@ -449,7 +465,7 @@ private fun SectionHeader(text: String) {
 }
 
 @Composable
-private fun RoomRow(item: RoomListItem, onOpen: (String, String) -> Unit, onJoin: (String) -> Unit) {
+private fun RoomRow(item: RoomListItem, unread: Long, onOpen: (String, String) -> Unit, onJoin: (String) -> Unit) {
     val channel = item.channel
     Row(
         Modifier.fillMaxWidth().clickable { onOpen(channel.id, channel.type.wire) }.padding(horizontal = 16.dp, vertical = 10.dp),
@@ -466,7 +482,15 @@ private fun RoomRow(item: RoomListItem, onOpen: (String, String) -> Unit, onJoin
             tint = if (item.isMember) OrangeAccent else MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Column(Modifier.weight(1f)) {
-            Text("#" + channel.name, style = MaterialTheme.typography.bodyLarge, fontWeight = if (item.isMember) FontWeight.SemiBold else FontWeight.Normal)
+            Text(
+                "#" + channel.name,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = when {
+                    unread > 0 -> FontWeight.Bold
+                    item.isMember -> FontWeight.SemiBold
+                    else -> FontWeight.Normal
+                },
+            )
             val about = channel.topic?.takeIf { it.isNotBlank() } ?: channel.about
             if (about.isNotBlank()) {
                 Text(about, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -474,6 +498,8 @@ private fun RoomRow(item: RoomListItem, onOpen: (String, String) -> Unit, onJoin
         }
         if (!item.isMember) {
             TextButton(onClick = { onJoin(channel.id) }) { Text(stringResource(R.string.community_client_join_room)) }
+        } else if (unread > 0) {
+            UnreadBadge(unread)
         }
     }
 }
