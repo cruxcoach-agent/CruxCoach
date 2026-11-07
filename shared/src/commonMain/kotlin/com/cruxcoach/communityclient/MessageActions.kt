@@ -42,11 +42,25 @@ fun CommunityEventTemplates.removeReaction(reactionId: String, createdAt: Long):
     return UnsignedEvent(createdAt, CommunityKinds.DELETION, listOf(listOf("e", reactionId)), "")
 }
 
-/** New text for your own message (kind:40003). */
-fun CommunityEventTemplates.edit(channelId: String, messageId: String, content: String, createdAt: Long): UnsignedEvent {
+/**
+ * New text for your own message (kind:40003). Like the Buzz desktop app, the edit tags the
+ * room members it mentions ([mentions]), so a name added in an edit notifies them. The Buzz
+ * phone app reads an edit's tags as the message's, so the edit also keeps a [broadcast] mark.
+ */
+fun CommunityEventTemplates.edit(
+    channelId: String,
+    messageId: String,
+    content: String,
+    createdAt: Long,
+    mentions: List<String> = emptyList(),
+    broadcast: Boolean = false,
+): UnsignedEvent {
     requireEventId(messageId)
     require(content.isNotBlank()) { "an edit needs text" }
-    return UnsignedEvent(createdAt, CommunityKinds.STREAM_MESSAGE_EDIT, listOf(listOf("h", channelId), listOf("e", messageId)), content)
+    val tags = listOf(listOf("h", channelId), listOf("e", messageId)) +
+        mentions.distinct().map { listOf("p", it) } +
+        listOfNotNull(listOf("broadcast", "1").takeIf { broadcast })
+    return UnsignedEvent(createdAt, CommunityKinds.STREAM_MESSAGE_EDIT, tags, content)
 }
 
 /** Deletes your own message (NIP-09 kind:5 with the room). */

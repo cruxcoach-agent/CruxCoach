@@ -13,6 +13,8 @@ import com.cruxcoach.communityclient.CommunityProfile
 import com.cruxcoach.communityclient.ForumView
 import com.cruxcoach.communityclient.JoinPolicy
 import com.cruxcoach.communityclient.MAX_DISPLAY_NAME_LENGTH
+import com.cruxcoach.communityclient.MentionCandidate
+import com.cruxcoach.communityclient.Mentions
 import com.cruxcoach.communityclient.ProfileBase
 import com.cruxcoach.communityclient.PublishResult
 import com.cruxcoach.communityclient.RoomListItem
@@ -245,6 +247,8 @@ data class CommunityRoomState(
     val joining: Boolean = false,
     /** The outcome of the last reaction, edit, deletion or report, until it was shown. */
     val feedback: ActionFeedback? = null,
+    /** Room members, for `@` mentions. */
+    val members: List<String> = emptyList(),
 )
 
 @HiltViewModel
@@ -257,6 +261,10 @@ class CommunityRoomViewModel @Inject constructor(
     private val client: CommunityClient? = holder.client()
     private val local = MutableStateFlow(CommunityRoomState(isForum = isForum, me = client?.me.orEmpty()))
     val actions = CommunityMessageActions(client, channelId, viewModelScope)
+
+    init {
+        client?.let { c -> viewModelScope.launch { local.value = local.value.copy(members = loadMembers(c, channelId)) } }
+    }
 
     val state: StateFlow<CommunityRoomState> = run {
         val c = client ?: return@run local.asStateFlow()
@@ -276,11 +284,14 @@ class CommunityRoomViewModel @Inject constructor(
         c.requestProfiles(authors.distinct())
     }
 
-    fun send(text: String) {
+    fun send(text: String, chosen: List<MentionCandidate>) {
         val c = client ?: return
+        val mentions = Mentions.recipients(text, chosen, local.value.members.toSet())
         local.value = local.value.copy(sending = true, sendError = null)
         viewModelScope.launch {
-            val error = publishError { if (isForum) c.createForumPost(channelId, text) else c.sendMessage(channelId, text) }
+            val error = publishError {
+                if (isForum) c.createForumPost(channelId, text, mentions) else c.sendMessage(channelId, text, mentions = mentions)
+            }
             local.value = local.value.let { it.copy(sending = false, sendError = error, sentCount = it.sentCount + if (error == null) 1 else 0) }
         }
     }
@@ -309,6 +320,8 @@ data class CommunityThreadState(
     val sentCount: Int = 0,
     /** The outcome of the last reaction, edit, deletion or report, until it was shown. */
     val feedback: ActionFeedback? = null,
+    /** Room members, for `@` mentions. */
+    val members: List<String> = emptyList(),
 )
 
 @HiltViewModel
@@ -323,6 +336,10 @@ class CommunityThreadViewModel @Inject constructor(
     private val local = MutableStateFlow(CommunityThreadState(isForum = isForum, me = client?.me.orEmpty()))
     val actions = CommunityMessageActions(client, channelId, viewModelScope)
 
+    init {
+        client?.let { c -> viewModelScope.launch { local.value = local.value.copy(members = loadMembers(c, channelId)) } }
+    }
+
     val state: StateFlow<CommunityThreadState> = run {
         val c = client ?: return@run local.asStateFlow()
         val room = c.rooms.map { s -> s.rooms.firstOrNull { it.channel.id == channelId } }.distinctUntilChanged()
@@ -336,17 +353,31 @@ class CommunityThreadViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), local.value)
     }
 
-    fun reply(text: String) {
+    fun reply(text: String, chosen: List<MentionCandidate>) {
         val c = client ?: return
+        val mentions = Mentions.recipients(text, chosen, local.value.members.toSet())
         local.value = local.value.copy(sending = true, sendError = null)
         viewModelScope.launch {
             val error = publishError {
-                if (isForum) c.commentOnForumPost(channelId, rootId, text)
-                else c.sendMessage(channelId, text, ThreadRef(rootId, rootId))
+                if (isForum) c.commentOnForumPost(channelId, rootId, text, mentions)
+                else c.sendMessage(channelId, text, ThreadRef(rootId, rootId), mentions)
             }
             local.value = local.value.let { it.copy(sending = false, sendError = error, sentCount = it.sentCount + if (error == null) 1 else 0) }
         }
     }
+}
+
+/** The room's members, with their profiles requested for the mention suggestions; empty on failure. */
+private suspend fun loadMembers(client: CommunityClient, channelId: String): List<String> {
+    val members = try {
+        client.roomMembers(channelId).map { it.pubkey }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        emptyList()
+    }
+    client.requestProfiles(members)
+    return members
 }
 
 /** Null when the relay accepted the event, else why not (relay refusal, connection, or signer). */
