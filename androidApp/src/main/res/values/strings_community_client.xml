@@ -133,4 +133,5 @@
     <string name="community_client_report_illegal">Illegal content</string>
     <string name="community_client_report_malware">Malware or a scam link</string>
     <string name="community_client_report_other">Something else</string>
+    <string name="community_client_older_replies">Show earlier replies</string>
 </resources>

@@ -48,6 +48,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -508,6 +509,7 @@ fun CommunityRoomScreen(
             else StreamList(
                 state,
                 onOpenThread = { onOpenThread(viewModel.channelId, type, it) },
+                onLoadOlder = viewModel::loadOlder,
                 onMenu = { message: CommunityMessage -> menuFor = message }.takeIf { room?.isMember == true },
                 onToggleReaction = { message: CommunityMessage, emoji: String -> viewModel.actions.toggleReaction(message, emoji) }
                     .takeIf { room?.canWrite == true },
@@ -520,6 +522,7 @@ fun CommunityRoomScreen(
 private fun StreamList(
     state: CommunityRoomState,
     onOpenThread: (String) -> Unit,
+    onLoadOlder: () -> Unit,
     onMenu: ((CommunityMessage) -> Unit)?,
     onToggleReaction: ((CommunityMessage, String) -> Unit)?,
 ) {
@@ -534,6 +537,17 @@ private fun StreamList(
     val listState = rememberLazyListState()
     val newestFirst = remember(stream.messages) { stream.messages.asReversed() }
     LaunchedEffect(newestFirst.firstOrNull()?.id) { listState.animateScrollToItem(0) }
+    // Near the oldest loaded message (the top, as the list is reversed): fetch the page before it.
+    val nearOldest by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            info.totalItemsCount > 0 && last >= info.totalItemsCount - 3
+        }
+    }
+    LaunchedEffect(nearOldest, stream.hasMore, stream.messages.size) {
+        if (nearOldest && stream.hasMore && !stream.loadingOlder) onLoadOlder()
+    }
     LazyColumn(
         Modifier.fillMaxSize().testTag("community_timeline"),
         state = listState,
@@ -555,6 +569,13 @@ private fun StreamList(
                     onMenu = onMenu?.let { { it(message) } },
                     onToggleReaction = onToggleReaction?.let { toggle -> { emoji: String -> toggle(message, emoji) } },
                 )
+            }
+        }
+        if (stream.loadingOlder) {
+            item(key = "older") {
+                Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                }
             }
         }
     }
@@ -644,6 +665,19 @@ fun CommunityThreadScreen(
                     )
                 }
                 item { HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) }
+            }
+            if (thread.hasOlder || thread.loadingOlder) {
+                item(key = "older") {
+                    Box(Modifier.fillMaxWidth().padding(8.dp), contentAlignment = Alignment.Center) {
+                        if (thread.loadingOlder) {
+                            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                        } else {
+                            TextButton(onClick = viewModel::loadOlder, modifier = Modifier.testTag("community_older_replies")) {
+                                Text(stringResource(R.string.community_client_older_replies))
+                            }
+                        }
+                    }
+                }
             }
             if (thread.loading && thread.replies.isEmpty()) {
                 item { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(24.dp)) } }
