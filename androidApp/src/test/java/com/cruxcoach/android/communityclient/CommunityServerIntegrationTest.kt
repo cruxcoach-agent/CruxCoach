@@ -9,6 +9,8 @@ import com.cruxcoach.communityclient.CommunityEventTemplates
 import com.cruxcoach.communityclient.CommunityInvite
 import com.cruxcoach.communityclient.CommunityJoin
 import com.cruxcoach.communityclient.CommunityKinds
+import com.cruxcoach.communityclient.ReportTarget
+import com.cruxcoach.communityclient.ReportType
 import com.cruxcoach.communityclient.SessionState
 import com.cruxcoach.communityclient.ThreadRef
 import com.cruxcoach.communityclient.ThreadView
@@ -137,6 +139,31 @@ class CommunityServerIntegrationTest {
             liveReaction.await()
             withTimeout(30_000) { joiner.thread(streamId, ownerMessage.id).first { it.reacted() } }
 
+            // Reactions: the joiner adds one to the owner's message and takes it back.
+            val thumbs = joiner.react(ownerMessage.id, "👍").also { assertAccepted(it) }.event
+            withTimeout(30_000) {
+                joiner.streamTimeline(streamId).first { s -> s.messages.firstOrNull { it.id == ownerMessage.id }?.reactionId("👍", joiner.me) == thumbs.id }
+            }
+            assertAccepted(joiner.removeReaction(thumbs.id))
+            withTimeout(30_000) {
+                joiner.streamTimeline(streamId).first { s -> s.messages.firstOrNull { it.id == ownerMessage.id }?.reactions?.isEmpty() == true }
+            }
+
+            // Edit and delete your own message; the room owner removes someone else's; a report is taken.
+            val draft = joiner.sendMessage(streamId, "typo hre").also { assertAccepted(it) }.event
+            assertAccepted(joiner.editMessage(streamId, draft.id, "typo here"))
+            withTimeout(30_000) {
+                joiner.streamTimeline(streamId).first { s -> s.messages.firstOrNull { it.id == draft.id }?.displayContent == "typo here" }
+            }
+            val mistake = joiner.sendMessage(streamId, "delete me").also { assertAccepted(it) }.event
+            val offTopic = joiner.sendMessage(streamId, "remove me").also { assertAccepted(it) }.event
+            assertAccepted(joiner.deleteMessage(streamId, mistake.id))
+            assertAccepted(owner.removeMessage(streamId, offTopic.id))
+            withTimeout(30_000) {
+                joiner.streamTimeline(streamId).first { s -> s.messages.none { it.id in setOf(mistake.id, offTopic.id) && !it.isDeleted } }
+            }
+            assertAccepted(joiner.report(ReportTarget.Message(ownerMessage.id, owner.me), ReportType.SPAM, "integration test"))
+
             // Forum: a topic from the joiner, a comment from the owner, seen live.
             val post = joiner.createForumPost(forumId, "Topic from the app\n\nDetails.").also { assertAccepted(it) }.event
             assertAccepted(owner.commentOnForumPost(forumId, post.id, "a comment"))
@@ -177,6 +204,9 @@ class CommunityServerIntegrationTest {
         return Json.parseToJsonElement(result.body).jsonObject["url"]!!.jsonPrimitive.content
     }
 
-    private fun assertAccepted(result: com.cruxcoach.communityclient.PublishResult) =
+    private fun assertAccepted(result: com.cruxcoach.communityclient.PublishResult) {
+        // Printed too: the workflow shows only `community-it:` lines of the test output.
+        if (!result.accepted) println("community-it: relay refused kind ${result.event.kind}: ${result.message}")
         assertTrue(result.accepted, "relay refused kind ${result.event.kind}: ${result.message}")
+    }
 }

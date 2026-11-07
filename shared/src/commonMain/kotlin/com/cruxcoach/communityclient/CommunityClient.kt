@@ -236,6 +236,34 @@ class CommunityClient(
     suspend fun sendMessage(channelId: String, text: String, replyTo: ThreadRef? = null): PublishResult =
         session.publish(CommunityEventTemplates.streamMessage(channelId, text, clock.nowSeconds(), replyTo))
 
+    /**
+     * Reacts to a message with [emoji]. A second tap before the first reaction came back
+     * finds it already there; the relay answers `duplicate:`, which is no failure.
+     */
+    suspend fun react(messageId: String, emoji: String): PublishResult =
+        session.publish(CommunityEventTemplates.reaction(messageId, emoji, clock.nowSeconds()))
+            .let { if (!it.accepted && it.message.startsWith("duplicate:")) it.copy(accepted = true) else it }
+
+    /** Takes back your reaction [reactionId]. */
+    suspend fun removeReaction(reactionId: String): PublishResult =
+        session.publish(CommunityEventTemplates.removeReaction(reactionId, clock.nowSeconds()))
+
+    /** Replaces the text of your own message. */
+    suspend fun editMessage(channelId: String, messageId: String, text: String): PublishResult =
+        session.publish(CommunityEventTemplates.edit(channelId, messageId, text, clock.nowSeconds()))
+
+    /** Deletes your own message. */
+    suspend fun deleteMessage(channelId: String, messageId: String): PublishResult =
+        session.publish(CommunityEventTemplates.deleteOwn(channelId, messageId, clock.nowSeconds()))
+
+    /** Removes someone's message as a room admin. */
+    suspend fun removeMessage(channelId: String, messageId: String): PublishResult =
+        session.publish(CommunityEventTemplates.removeMessage(channelId, messageId, clock.nowSeconds()))
+
+    /** Reports a message or a person to the community's moderators. */
+    suspend fun report(target: ReportTarget, type: ReportType, reason: String): PublishResult =
+        session.publish(CommunityEventTemplates.report(target, type, reason, clock.nowSeconds()))
+
     suspend fun createForumPost(channelId: String, text: String): PublishResult =
         session.publish(CommunityEventTemplates.forumPost(channelId, text, clock.nowSeconds()))
 

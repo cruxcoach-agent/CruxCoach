@@ -153,6 +153,52 @@ class CommunitySessionTest {
     }
 
     @Test
+    fun rateLimited_eventsAndRequests_areSentAgainAfterTheWait() = runTest {
+        val factory = FakeSocketFactory()
+        val signer = FakeSigner()
+        val (session, scope) = newSession(factory, signer)
+        session.start()
+        runCurrent()
+        factory.last.listener.onOpen()
+        factory.last.listener.onMessage("""["AUTH","c"]""")
+        runCurrent()
+        factory.last.listener.onMessage("""["OK","${signer.signed.last().id}",true,""]""")
+        runCurrent()
+
+        val sending = async { session.publish(CommunityEventTemplates.streamMessage(CHANNEL, "hello", 1_000)) }
+        runCurrent()
+        val sent = signer.signed.last()
+        factory.last.listener.onMessage("""["OK","${sent.id}",false,"rate-limited: quota exceeded; retry in 2s"]""")
+        runCurrent()
+        assertEquals(1, factory.last.frames("EVENT").size, "not before the wait")
+        advanceTimeBy(3_001) // the wait plus up to a second of spread
+        runCurrent()
+        assertEquals(2, factory.last.frames("EVENT").size, "sent again after the wait")
+        factory.last.listener.onMessage("""["OK","${sent.id}",true,""]""")
+        runCurrent()
+        assertTrue(sending.await().accepted)
+
+        // A wait longer than the sender waits is no retry: the sender learns why at once.
+        val later = async { session.publish(CommunityEventTemplates.streamMessage(CHANNEL, "later", 1_000)) }
+        runCurrent()
+        factory.last.listener.onMessage("""["OK","${signer.signed.last().id}",false,"rate-limited: quota exceeded; retry in 40s"]""")
+        runCurrent()
+        assertEquals("rate-limited: quota exceeded; retry in 40s", later.await().message)
+
+        val querying = async { session.query(listOf(CommunityFilters.channelDirectory())) }
+        runCurrent()
+        val subId = factory.last.frames("REQ").last().substringAfter("[\"REQ\",\"").substringBefore('"')
+        factory.last.listener.onMessage("""["CLOSED","$subId","rate-limited: too many concurrent requests"]""")
+        advanceTimeBy(2_001)
+        runCurrent()
+        assertEquals(2, factory.last.frames("REQ").count { it.contains(subId) }, "the request is sent again")
+        factory.last.listener.onMessage("""["EOSE","$subId"]""")
+        runCurrent()
+        assertTrue(querying.await().isEmpty())
+        scope.cancel()
+    }
+
+    @Test
     fun publish_waitsForOk_andDropsBadSignatures() = runTest {
         val factory = FakeSocketFactory()
         val signer = FakeSigner()

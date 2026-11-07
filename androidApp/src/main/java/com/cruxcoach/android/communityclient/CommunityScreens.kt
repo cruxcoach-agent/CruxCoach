@@ -1,6 +1,7 @@
 package com.cruxcoach.android.communityclient
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -47,6 +50,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -84,6 +88,7 @@ import com.halilibo.richtext.ui.string.RichTextStringStyle
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
 
@@ -479,7 +484,15 @@ fun CommunityRoomScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val room = state.room
     val type = if (state.isForum) ChannelType.FORUM.wire else ChannelType.STREAM.wire
+    val snackbar = remember { SnackbarHostState() }
+    ActionFeedbackEffect(state.feedback, snackbar, viewModel.actions::clearFeedback)
+    // The id survives rotation, so a half-written edit or report stays open.
+    var menuFor by rememberSaveable { mutableStateOf<String?>(null) }
+    menuFor?.let { id -> state.stream.messages.firstOrNull { it.id == id } }?.let { message ->
+        MessageMenu(message, state.me, canModerate(room?.myRole), viewModel.actions, onDismiss = { menuFor = null })
+    }
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = {
@@ -512,13 +525,24 @@ fun CommunityRoomScreen(
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             if (state.isForum) ForumList(state, onOpen = { onOpenThread(viewModel.channelId, type, it) })
-            else StreamList(state, onOpenThread = { onOpenThread(viewModel.channelId, type, it) })
+            else StreamList(
+                state,
+                onOpenThread = { onOpenThread(viewModel.channelId, type, it) },
+                onMenu = { message: CommunityMessage -> menuFor = message.id }.takeIf { room?.isMember == true },
+                onToggleReaction = { message: CommunityMessage, emoji: String -> viewModel.actions.toggleReaction(message, emoji) }
+                    .takeIf { room?.canWrite == true },
+            )
         }
     }
 }
 
 @Composable
-private fun StreamList(state: CommunityRoomState, onOpenThread: (String) -> Unit) {
+private fun StreamList(
+    state: CommunityRoomState,
+    onOpenThread: (String) -> Unit,
+    onMenu: ((CommunityMessage) -> Unit)?,
+    onToggleReaction: ((CommunityMessage, String) -> Unit)?,
+) {
     val stream = state.stream
     if (stream.messages.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -548,6 +572,8 @@ private fun StreamList(state: CommunityRoomState, onOpenThread: (String) -> Unit
                     thread = stream.threads[message.id],
                     // A reply also sent to the room belongs to its thread: open that thread.
                     onOpenThread = { onOpenThread(message.thread?.rootId ?: message.id) },
+                    onMenu = onMenu?.let { { it(message) } },
+                    onToggleReaction = onToggleReaction?.let { toggle -> { emoji: String -> toggle(message, emoji) } },
                 )
             }
         }
@@ -595,7 +621,17 @@ fun CommunityThreadScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val room = state.room
+    val snackbar = remember { SnackbarHostState() }
+    ActionFeedbackEffect(state.feedback, snackbar, viewModel.actions::clearFeedback)
+    var menuFor by rememberSaveable { mutableStateOf<String?>(null) }
+    menuFor?.let { id -> (listOfNotNull(state.thread.root) + state.thread.replies).firstOrNull { it.id == id } }?.let { message ->
+        MessageMenu(message, state.me, canModerate(room?.myRole), viewModel.actions, onDismiss = { menuFor = null })
+    }
+    val onMenu: ((CommunityMessage) -> Unit)? = { message: CommunityMessage -> menuFor = message.id }.takeIf { room?.isMember == true }
+    val onToggle: ((CommunityMessage, String) -> Unit)? =
+        { message: CommunityMessage, emoji: String -> viewModel.actions.toggleReaction(message, emoji) }.takeIf { room?.canWrite == true }
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(if (state.isForum) R.string.community_client_post_title else R.string.community_client_thread_title)) },
@@ -619,14 +655,24 @@ fun CommunityThreadScreen(
         val thread = state.thread
         LazyColumn(Modifier.fillMaxSize().padding(padding).testTag("community_thread"), contentPadding = PaddingValues(vertical = 8.dp)) {
             thread.root?.let { root ->
-                item(key = root.id) { MessageRow(root, state.profiles, state.me, thread = null, onOpenThread = null) }
+                item(key = root.id) {
+                    MessageRow(
+                        root, state.profiles, state.me, thread = null, onOpenThread = null,
+                        onMenu = onMenu?.let { { it(root) } },
+                        onToggleReaction = onToggle?.let { toggle -> { emoji: String -> toggle(root, emoji) } },
+                    )
+                }
                 item { HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) }
             }
             if (thread.loading && thread.replies.isEmpty()) {
                 item { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(24.dp)) } }
             }
             items(thread.replies, key = { it.id }) { reply ->
-                MessageRow(reply, state.profiles, state.me, thread = null, onOpenThread = null, indent = true)
+                MessageRow(
+                    reply, state.profiles, state.me, thread = null, onOpenThread = null, indent = true,
+                    onMenu = onMenu?.let { { it(reply) } },
+                    onToggleReaction = onToggle?.let { toggle -> { emoji: String -> toggle(reply, emoji) } },
+                )
             }
             thread.error?.let { item { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) } }
         }
@@ -634,6 +680,24 @@ fun CommunityThreadScreen(
 }
 
 // ── Shared pieces ───────────────────────────────────────────────────────────
+
+/** Shows the outcome of a message action once, then clears it. */
+@Composable
+private fun ActionFeedbackEffect(feedback: ActionFeedback?, snackbar: SnackbarHostState, onShown: () -> Unit) {
+    val text = when (feedback) {
+        null -> null
+        is ActionFeedback.Failed -> stringResource(R.string.community_client_action_failed, publishErrorText(feedback.reason))
+        ActionFeedback.Reported -> stringResource(R.string.community_client_report_sent)
+    }
+    // The snackbar outlives the key: clearing the feedback must not cancel it.
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(feedback) {
+        if (text != null) {
+            onShown()
+            scope.launch { snackbar.showSnackbar(text) }
+        }
+    }
+}
 
 @Composable
 private fun MessageRow(
@@ -643,10 +707,17 @@ private fun MessageRow(
     thread: ThreadSummary?,
     onOpenThread: (() -> Unit)?,
     indent: Boolean = false,
+    /** Long press: reactions, copy, edit, delete, report. Null where the user cannot act. */
+    onMenu: (() -> Unit)? = null,
+    onToggleReaction: ((String) -> Unit)? = null,
 ) {
     Column(
         Modifier.fillMaxWidth()
-            .clickable(enabled = onOpenThread != null) { onOpenThread?.invoke() }
+            .combinedClickable(
+                enabled = onOpenThread != null || onMenu != null,
+                onClick = { onOpenThread?.invoke() },
+                onLongClick = onMenu,
+            )
             .padding(start = if (indent) 32.dp else 16.dp, end = 16.dp, top = 6.dp, bottom = 6.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
@@ -667,12 +738,7 @@ private fun MessageRow(
         } else {
             RichText(style = linkStyle()) { Markdown(content = message.displayContent) }
         }
-        if (message.reactions.isNotEmpty()) {
-            Text(
-                message.reactions.entries.sortedByDescending { it.value.size }.joinToString("  ") { "${it.key} ${it.value.size}" },
-                style = MaterialTheme.typography.labelMedium,
-            )
-        }
+        if (!message.isDeleted) ReactionChips(message, me, onToggleReaction)
         if (thread != null && thread.replyCount + thread.descendantCount > 0 && onOpenThread != null) {
             val count = maxOf(thread.replyCount, thread.descendantCount)
             Text(

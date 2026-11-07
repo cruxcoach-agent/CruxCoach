@@ -114,4 +114,31 @@
     <string name="community_client_publish_refused">The community did not accept it.</string>
     <string name="community_client_publish_profile_unavailable">Your public profile could not be loaded. Try again.</string>
     <string name="community_client_rooms_failed">The rooms could not be loaded. Tap refresh to try again.</string>
+
+    <!-- Message menu: reactions, edit, delete, remove, report -->
+    <string name="community_client_action_copy">Copy text</string>
+    <string name="community_client_action_edit">Edit</string>
+    <string name="community_client_action_delete">Delete</string>
+    <string name="community_client_action_remove">Remove message</string>
+    <string name="community_client_action_report_message">Report message</string>
+    <string name="community_client_action_report_person">Report person</string>
+    <string name="community_client_action_failed">That did not work: %1$s</string>
+    <string name="community_client_edit_title">Edit message</string>
+    <string name="community_client_delete_title">Delete this message?</string>
+    <string name="community_client_delete_body">It disappears for everyone in the room.</string>
+    <string name="community_client_remove_title">Remove this message?</string>
+    <string name="community_client_remove_body">As an admin you remove it for everyone in the room.</string>
+    <string name="community_client_report_message_title">Report message</string>
+    <string name="community_client_report_person_title">Report person</string>
+    <string name="community_client_report_body">Your report goes only to the community\'s moderators. Nobody else sees it.</string>
+    <string name="community_client_report_reason_hint">What happened? (optional)</string>
+    <string name="community_client_report_send">Send report</string>
+    <string name="community_client_report_sent">Report sent to the moderators.</string>
+    <string name="community_client_report_spam">Spam</string>
+    <string name="community_client_report_profanity">Insults or profanity</string>
+    <string name="community_client_report_impersonation">Pretends to be someone else</string>
+    <string name="community_client_report_nudity">Nudity</string>
+    <string name="community_client_report_illegal">Illegal content</string>
+    <string name="community_client_report_malware">Malware or a scam link</string>
+    <string name="community_client_report_other">Something else</string>
 </resources>

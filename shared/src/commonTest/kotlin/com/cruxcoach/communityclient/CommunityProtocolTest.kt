@@ -9,6 +9,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -80,11 +81,15 @@ class CommunityProtocolTest {
         assertEquals(22242, auth.kind)
         assertEquals(listOf(listOf("relay", "wss://community.example"), listOf("challenge", "chal")), auth.tags)
 
-        val http = CommunityEventTemplates.httpAuth("https://community.example/query", "post", 7, "ff".repeat(32))
+        val http = CommunityEventTemplates.httpAuth("https://community.example/query", "post", 7, "ff".repeat(32), nonce = "n1")
         assertEquals(
-            listOf(listOf("u", "https://community.example/query"), listOf("method", "POST"), listOf("payload", "ff".repeat(32))),
+            listOf(listOf("u", "https://community.example/query"), listOf("method", "POST"), listOf("payload", "ff".repeat(32)), listOf("nonce", "n1")),
             http.tags,
         )
+        // The relay refuses an auth event it has seen, so two equal requests in one second must differ.
+        val again = { CommunityEventTemplates.httpAuth("https://community.example/query", "POST", 7, "ff".repeat(32)) }
+        assertNotEquals(again().tags, again().tags)
+        assertTrue(CommunityEventTemplates.newNonce().matches(Regex("[0-9a-f]{32}")))
     }
 
     @Test

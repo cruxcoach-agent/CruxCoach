@@ -55,6 +55,9 @@ class CommunityException(message: String) : Exception(message)
  * - Answers the relay's NIP-42 challenge with a signed kind:22242 before anything else.
  * - Keeps subscriptions across reconnects (the REQ is sent again after re-auth).
  * - Verifies every event's signature, and that relay-only kinds come from the relay key.
+ * - When the relay rate-limits a request (`rate-limited:`), sends it again after the wait the
+ *   relay names, a few times. An event is sent again only if that fits in the time its sender
+ *   waits; otherwise the sender gets the reason at once, and nothing is sent after it gave up.
  *
  * All state lives in one actor coroutine; socket callbacks only post messages to it.
  */
@@ -91,6 +94,9 @@ class CommunitySession(
         data class Subscribe(val id: String, val filters: List<RelayFilter>, val out: (SubscriptionItem) -> Unit) : Msg
         data class Unsubscribe(val id: String) : Msg
         data class Publish(val event: CommunityEvent, val result: CompletableDeferred<PublishResult>) : Msg
+        data class Resend(val gen: Int, val eventId: String) : Msg
+        data class Forget(val eventId: String) : Msg
+        data class Resubscribe(val gen: Int, val id: String) : Msg
     }
 
     private class Sub(val filters: List<RelayFilter>, val out: (SubscriptionItem) -> Unit)
@@ -107,6 +113,9 @@ class CommunitySession(
     private val subs = LinkedHashMap<String, Sub>()
     private val pendingOk = HashMap<String, CompletableDeferred<PublishResult>>()
     private val pendingEvents = HashMap<String, CommunityEvent>()
+    // Rate-limited sends so far, per event id and per subscription id.
+    private val eventRetries = HashMap<String, Int>()
+    private val subRetries = HashMap<String, Int>()
     private var timerJob: Job? = null
 
     /** Connects and keeps the session up until [stop]. */
@@ -163,7 +172,7 @@ class CommunitySession(
         val result = CompletableDeferred<PublishResult>()
         inbox.trySend(Msg.Publish(signed, result))
         return withTimeoutOrNull(timeoutMs) { result.await() }
-            ?: PublishResult(signed, false, "timeout: no answer from the relay")
+            ?: PublishResult(signed, false, "timeout: no answer from the relay").also { inbox.trySend(Msg.Forget(signed.id)) }
     }
 
     private fun ensureActor() {
@@ -214,8 +223,21 @@ class CommunitySession(
                 subs[msg.id] = Sub(msg.filters, msg.out)
                 if (_state.value == SessionState.Ready) socket?.send(ClientFrames.req(msg.id, msg.filters))
             }
-            is Msg.Unsubscribe -> if (subs.remove(msg.id) != null && _state.value == SessionState.Ready) {
-                socket?.send(ClientFrames.close(msg.id))
+            is Msg.Unsubscribe -> {
+                subRetries.remove(msg.id)
+                if (subs.remove(msg.id) != null && _state.value == SessionState.Ready) socket?.send(ClientFrames.close(msg.id))
+            }
+            is Msg.Resend -> if (msg.gen == generation && _state.value == SessionState.Ready) {
+                pendingEvents[msg.eventId]?.let { socket?.send(ClientFrames.event(it)) }
+            }
+            // The sender gave up: never send this event again, so a send shown as failed is not posted later.
+            is Msg.Forget -> {
+                pendingOk.remove(msg.eventId)
+                pendingEvents.remove(msg.eventId)
+                eventRetries.remove(msg.eventId)
+            }
+            is Msg.Resubscribe -> if (msg.gen == generation && _state.value == SessionState.Ready) {
+                subs[msg.id]?.let { socket?.send(ClientFrames.req(msg.id, it.filters)) }
             }
             is Msg.Publish -> {
                 if (_state.value != SessionState.Ready || socket?.send(ClientFrames.event(msg.event)) != true) {
@@ -282,6 +304,8 @@ class CommunitySession(
         }
         pendingOk.clear()
         pendingEvents.clear()
+        eventRetries.clear()
+        subRetries.clear()
     }
 
     private fun onFrame(text: String) {
@@ -314,6 +338,8 @@ class CommunitySession(
                     }
                     return
                 }
+                if (!frame.accepted && retryLater(frame.message, eventRetries, frame.eventId, MAX_EVENT_RETRY_WAIT_SECONDS) { gen -> Msg.Resend(gen, frame.eventId) }) return
+                eventRetries.remove(frame.eventId)
                 val deferred = pendingOk.remove(frame.eventId) ?: return
                 val event = pendingEvents.remove(frame.eventId) ?: return
                 deferred.complete(PublishResult(event, frame.accepted, frame.message))
@@ -323,11 +349,40 @@ class CommunitySession(
                 if (!accepts(frame.event)) return
                 sub.out(SubscriptionItem.Event(frame.event))
             }
-            is RelayFrame.Eose -> subs[frame.subscriptionId]?.out?.invoke(SubscriptionItem.Eose)
-            is RelayFrame.Closed -> subs.remove(frame.subscriptionId)?.out?.invoke(SubscriptionItem.Closed(frame.reason))
+            is RelayFrame.Eose -> {
+                subRetries.remove(frame.subscriptionId)
+                subs[frame.subscriptionId]?.out?.invoke(SubscriptionItem.Eose)
+            }
+            is RelayFrame.Closed -> {
+                val id = frame.subscriptionId
+                if (id in subs && retryLater(frame.reason, subRetries, id, MAX_RATE_LIMIT_WAIT_SECONDS) { gen -> Msg.Resubscribe(gen, id) }) return
+                subRetries.remove(id)
+                subs.remove(id)?.out?.invoke(SubscriptionItem.Closed(frame.reason))
+            }
             is RelayFrame.Notice -> Unit
         }
     }
+
+    /**
+     * For a `rate-limited:` answer, schedules [again] after the wait the relay names, unless that
+     * wait is longer than [maxWaitSeconds] or [key] was retried [MAX_RATE_LIMIT_RETRIES] times.
+     * A random extra second spreads the requests the relay refused together.
+     */
+    private fun retryLater(reason: String, retries: HashMap<String, Int>, key: String, maxWaitSeconds: Long, again: (Int) -> Msg): Boolean {
+        if (relayReasonPrefix(reason) != "rate-limited") return false
+        val tries = retries[key] ?: 0
+        val seconds = RETRY_IN.find(reason)?.groupValues?.get(1)?.toLongOrNull() ?: 1
+        if (tries >= MAX_RATE_LIMIT_RETRIES || seconds > maxWaitSeconds || !pendingOrOpen(key)) return false
+        retries[key] = tries + 1
+        val gen = generation
+        scope.launch {
+            delay(seconds.coerceAtLeast(1) * 1000 + Random.nextLong(1_000))
+            inbox.trySend(again(gen))
+        }
+        return true
+    }
+
+    private fun pendingOrOpen(key: String): Boolean = key in pendingEvents || key in subs
 
     private fun onAuthenticated() {
         attempt = 0
@@ -343,3 +398,10 @@ class CommunitySession(
     private fun newSubscriptionId(): String =
         "c" + Random.nextLong().toULong().toString(16) + Random.nextInt().toUInt().toString(16)
 }
+
+private const val MAX_RATE_LIMIT_RETRIES = 3
+private const val MAX_RATE_LIMIT_WAIT_SECONDS = 10L
+
+/** Two retries of this wait still fit in [CommunitySession.publish]'s 15 seconds. */
+private const val MAX_EVENT_RETRY_WAIT_SECONDS = 5L
+private val RETRY_IN = Regex("""retry in (\d+)\s*s""")

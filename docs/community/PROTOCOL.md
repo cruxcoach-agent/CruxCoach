@@ -1,6 +1,6 @@
 # Community client: protocol map
 
-Status: spike for [#61](https://github.com/CruxCoach/CruxCoach/issues/61), 2026-11-06.
+Status: spike for [#61](https://github.com/CruxCoach/CruxCoach/issues/61), 2026-11-06; phase 1 ([#73](https://github.com/CruxCoach/CruxCoach/issues/73)) in progress.
 
 The CruxCoach community runs on a standard [Buzz](https://github.com/block/buzz) server (Apache-2.0).
 This document lists what the Buzz phone app does, which events and endpoints each feature uses, how
@@ -22,7 +22,8 @@ version with upstream `main` to estimate upkeep.
 | Relay info | `GET /` with `Accept: application/nostr+json` (NIP-11). `self` is the relay key that signs relay-only kinds; `limitation.max_limit` is 1000. | Read `self` and drop relay-only kinds (39000–39007, 44100/44101) signed by any other key. |
 | Sign-in | NIP-42. The relay sends `["AUTH", <challenge>]` right after connect. The client answers with kind 22242, tags `relay` = `wss://<host>` (no path) and `challenge`; ±60 s clock window. | Answer before any REQ. With `BUZZ_REQUIRE_AUTH_TOKEN` every read needs it. |
 | Membership | NIP-43 closed community: after AUTH the relay checks `relay_members`. A non-member gets `OK false "restricted: not a relay member"`. | Treat that as "join with an invite", not as a network error; do not retry. |
-| HTTP auth | NIP-98 kind 27235: exactly one `u` (full URL, normalised) and one `method` tag, `payload` = hex SHA-256 of the body on POST routes, ±60 s, each event usable once (replay set). Header `Authorization: Nostr <base64(event)>`. | Sign per request. With Amber this is one approval per request unless the user allows kind 27235 permanently. |
+| HTTP auth | NIP-98 kind 27235: exactly one `u` (full URL, normalised) and one `method` tag, `payload` = hex SHA-256 of the body on POST routes, ±60 s, each event usable once (replay set). Header `Authorization: Nostr <base64(event)>`. | Sign per request, with a random `nonce` tag as the phone app does: two equal requests in one second would otherwise be the same event, and the second one is refused. With Amber this is one approval per request unless the user allows kind 27235 permanently. |
+| Rate limits | Per user: about 10 socket frames a second (50 per 5 s, every REQ, CLOSE and EVENT counts), 60 stored events a minute, 300 HTTP calls a minute. Over it: `rate-limited: quota exceeded; retry in Ns` (OK or CLOSED); also `rate-limited: too many concurrent requests`. | Send a request again after the named wait; an event only if the wait fits the sender's timeout. Batch filters (up to 10 per REQ). |
 | Agents | Agent keys carry a NIP-OA `auth` tag (owner attestation) in kind 0; owners publish kind 30177 managed-agent records. Agents may authenticate through their owner (`BUZZ_ALLOW_NIP_OA_AUTH`). | Read-only: show an "agent" badge and the owner. Nothing to sign. |
 
 ## 2. Joining
@@ -63,9 +64,9 @@ authenticated WebSocket, "HTTP" a NIP-98 request.
 | Live messages | REQ `#h:[room]`, `since` now, kinds 9/40002/40099 + aux | WS | Merge by id; replies update thread counts. | ✅ |
 | Threads | NIP-10 marked tags: direct reply `["e", head, "", "reply"]`; deeper `root` + `reply`. Broadcast reply adds `["broadcast", "1"]`. Thread reads: the head by `ids` + `#h` + kinds, replies by REQ `#e:[head]`, or NIP-CW thread windows / legacy oldest-first paging over `/query` (`depth_limit`, `thread_cursor`) | WS / HTTP | Max depth 100. Unknown parents are refused. | ✅ via REQ |
 | Thread summaries | kind 39005 (`reply_count`, `descendant_count`, `last_reply_at`, `participants`) | HTTP overlay | Only via the window query. | ✅ |
-| Reactions | kind 7 with `["e", target]`; the relay derives the room from the target. Custom emoji: NIP-30 `emoji` tags, kind 30030 sets | WS | Subscribe with `#h` to get them live. | shown, not sent |
-| Edits | kind 40003 with `h` and `["e", original]`; author (or the agent's owner) only | WS | Newest edit wins. | shown, not sent |
-| Deletes | kind 5 (own, NIP-09) or kind 9005 (own, or admin) | WS | Hide the row. | shown, not sent |
+| Reactions | kind 7 with `["e", target]`; the relay derives the room from the target. Custom emoji: NIP-30 `emoji` tags, kind 30030 sets | WS | Subscribe with `#h` to get them live. | ✅ sent and taken back |
+| Edits | kind 40003 with `h` and `["e", original]`; author (or the agent's owner) only | WS | Newest edit wins. | ✅ own messages |
+| Deletes | kind 5 (own, NIP-09; the relay also lets an agent's owner delete) or kind 9005 (own, or admin). A kind 5 on a reaction takes it back | WS | Hide the target; the relay checks who may delete, so the client trusts every deletion it delivers, as the Buzz apps do. | ✅ own messages; admins remove |
 | Mentions | `["p", key]` notifies (key must be a room member), `["mention", key]` names without notifying | WS | Member picker; the relay rejects `p` for non-members. | — |
 | Pins, bookmarks, scheduled | kinds 40004, 40005, 40006, reminders 40007 / 30300 (NIP-ER, NIP-44-encrypted to self) | WS | Phase 2. | — |
 | Diffs, room notices | kind 40008; kind 40099 signed by the relay key, content JSON `type` (`member_joined`, `member_left`, `member_removed`, `topic_changed`, `purpose_changed`, `channel_created`, `channel_archived`, `channel_unarchived`), `actor`, `target`, `topic`/`purpose` | WS / HTTP | Show 40099 as a one-line notice; hide unknown types; accept it only from the relay key (it is not in the relay's relay-only list, so the client checks the signer). | ✅ notices, diffs read |
@@ -99,9 +100,9 @@ authenticated WebSocket, "HTTP" a NIP-98 request.
 
 | Capability | Events / endpoints | Auth | What our client needs | Spike |
 |---|---|---|---|---|
-| Report | kind 1984 | WS | Everyone. | — |
+| Report | kind 1984 | WS | Everyone. | ✅ message or person |
 | Ban / timeout | kinds 9040–9043; resolve report 9044 | WS | Admins. | — |
-| Remove message / member | kind 9005 (admin delete), 9001 (remove user), 9000 (add, roles) | WS | Admins and owners. | — |
+| Remove message / member | kind 9005 (admin delete), 9001 (remove user), 9000 (add, roles) | WS | Admins and owners. | ✅ remove message |
 | Relay membership | kinds 9030–9033 (add, remove, role, workspace icon); roster kind 13534 | WS | Owners and admins. | — |
 | Queues | `GET /moderation/reports`, `/moderation/audit`, `/moderation/restricted` | HTTP + moderator role | Admin screens. | — |
 
