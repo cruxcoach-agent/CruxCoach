@@ -80,7 +80,9 @@ data class StreamTimeline(
     val messages: List<CommunityMessage> = emptyList(),
     val threads: Map<String, ThreadSummary> = emptyMap(),
     val loading: Boolean = true,
+    /** Older messages exist; ask for them with the timeline's older-page requests. */
     val hasMore: Boolean = false,
+    val loadingOlder: Boolean = false,
     val error: String? = null,
 )
 
@@ -89,6 +91,9 @@ data class ThreadView(
     val root: CommunityMessage? = null,
     val replies: List<CommunityMessage> = emptyList(),
     val loading: Boolean = true,
+    /** Earlier replies exist than the ones loaded. */
+    val hasOlder: Boolean = false,
+    val loadingOlder: Boolean = false,
     val error: String? = null,
 )
 

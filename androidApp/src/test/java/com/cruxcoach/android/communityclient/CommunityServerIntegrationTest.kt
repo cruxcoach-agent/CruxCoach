@@ -25,7 +25,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -175,6 +177,16 @@ class CommunityServerIntegrationTest {
                 joiner.streamTimeline(streamId).first { s -> s.messages.none { it.id in setOf(mistake.id, offTopic.id) && !it.isDeleted } }
             }
             assertAccepted(joiner.report(ReportTarget.Message(ownerMessage.id, owner.me), ReportType.SPAM, "integration test"))
+
+            // Older pages: three messages per window page, paged back until the relay says there are no more.
+            val olderRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+            val everything = withTimeout(60_000) {
+                joiner.streamTimeline(streamId, pageSize = 3, older = olderRequests)
+                    .onEach { s -> if (!s.loading && s.hasMore && !s.loadingOlder) olderRequests.tryEmit(Unit) }
+                    .first { s -> !s.loading && !s.hasMore && !s.loadingOlder }
+            }
+            assertTrue(everything.messages.size > 3, "more than one page was loaded")
+            assertTrue(everything.messages.any { it.id == ownerMessage.id }, "paging reached the room's first messages")
 
             // Forum: a topic from the joiner, a comment from the owner, seen live.
             val post = joiner.createForumPost(forumId, "Topic from the app\n\nDetails.").also { assertAccepted(it) }.event

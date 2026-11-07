@@ -28,6 +28,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -261,6 +262,12 @@ class CommunityRoomViewModel @Inject constructor(
     private val client: CommunityClient? = holder.client()
     private val local = MutableStateFlow(CommunityRoomState(isForum = isForum, me = client?.me.orEmpty()))
     val actions = CommunityMessageActions(client, channelId, viewModelScope)
+    private val olderRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /** Loads the next older page when the user scrolls to the oldest message. */
+    fun loadOlder() {
+        olderRequests.tryEmit(Unit)
+    }
 
     init {
         client?.let { c -> viewModelScope.launch { local.value = local.value.copy(members = loadMembers(c, channelId)) } }
@@ -271,7 +278,7 @@ class CommunityRoomViewModel @Inject constructor(
         val room = c.rooms.map { s -> s.rooms.firstOrNull { it.channel.id == channelId } }.distinctUntilChanged()
         val content: Flow<Pair<StreamTimeline, ForumView>> =
             if (isForum) c.forum(channelId).map { StreamTimeline(loading = false) to it }
-            else c.streamTimeline(channelId).map { it to ForumView(loading = false) }
+            else c.streamTimeline(channelId, older = olderRequests).map { it to ForumView(loading = false) }
         combine(content.onEach { (s, f) -> requestAuthors(c, s, f) }, room, c.profiles, local, actions.feedback) { (s, f), item, profiles, l, feedback ->
             l.copy(room = item, stream = s, forum = f, profiles = profiles, feedback = feedback)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), local.value)
@@ -335,6 +342,12 @@ class CommunityThreadViewModel @Inject constructor(
     private val client: CommunityClient? = holder.client()
     private val local = MutableStateFlow(CommunityThreadState(isForum = isForum, me = client?.me.orEmpty()))
     val actions = CommunityMessageActions(client, channelId, viewModelScope)
+    private val olderRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /** Loads earlier replies of a long thread. */
+    fun loadOlder() {
+        olderRequests.tryEmit(Unit)
+    }
 
     init {
         client?.let { c -> viewModelScope.launch { local.value = local.value.copy(members = loadMembers(c, channelId)) } }
@@ -344,7 +357,7 @@ class CommunityThreadViewModel @Inject constructor(
         val c = client ?: return@run local.asStateFlow()
         val room = c.rooms.map { s -> s.rooms.firstOrNull { it.channel.id == channelId } }.distinctUntilChanged()
         combine(
-            c.thread(channelId, rootId).onEach { t -> c.requestProfiles(listOfNotNull(t.root?.author) + t.replies.map { it.author }) },
+            c.thread(channelId, rootId, older = olderRequests).onEach { t -> c.requestProfiles(listOfNotNull(t.root?.author) + t.replies.map { it.author }) },
             room,
             c.profiles,
             local,
