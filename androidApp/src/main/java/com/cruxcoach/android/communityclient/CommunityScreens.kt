@@ -1,5 +1,6 @@
 package com.cruxcoach.android.communityclient
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -63,6 +64,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
@@ -76,6 +79,8 @@ import com.cruxcoach.communityclient.ChannelType
 import com.cruxcoach.communityclient.CommunityMessage
 import com.cruxcoach.communityclient.CommunityProfile
 import com.cruxcoach.communityclient.MAX_DISPLAY_NAME_LENGTH
+import com.cruxcoach.communityclient.MentionCandidate
+import com.cruxcoach.communityclient.Mentions
 import com.cruxcoach.communityclient.RoomListItem
 import com.cruxcoach.communityclient.SessionState
 import com.cruxcoach.communityclient.SystemNotice
@@ -493,6 +498,7 @@ fun CommunityRoomScreen(
                     error = state.sendError,
                     sentCount = state.sentCount,
                     onSend = viewModel::send,
+                    mentionable = mentionCandidates(state.members, state.profiles, state.me),
                 )
             }
         },
@@ -622,6 +628,7 @@ fun CommunityThreadScreen(
                     error = state.sendError,
                     sentCount = state.sentCount,
                     onSend = viewModel::reply,
+                    mentionable = mentionCandidates(state.members, state.profiles, state.me),
                 )
             }
         },
@@ -687,6 +694,7 @@ private fun MessageRow(
 ) {
     Column(
         Modifier.fillMaxWidth()
+            .then(if (me in message.mentions && message.author != me) Modifier.background(OrangeAccent.copy(alpha = 0.08f)) else Modifier)
             .combinedClickable(
                 enabled = onOpenThread != null || onMenu != null,
                 onClick = { onOpenThread?.invoke() },
@@ -764,19 +772,41 @@ private fun NoticeRow(notice: SystemNotice, createdAt: Long, profiles: Map<Strin
 }
 
 @Composable
-private fun Composer(hint: String, sending: Boolean, error: String?, sentCount: Int, onSend: (String) -> Unit) {
-    var text by rememberSaveable { mutableStateOf("") }
+private fun Composer(
+    hint: String,
+    sending: Boolean,
+    error: String?,
+    sentCount: Int,
+    onSend: (String, List<MentionCandidate>) -> Unit,
+    /** Room members the user can mention with `@`, without the user. */
+    mentionable: List<MentionCandidate> = emptyList(),
+) {
+    var value by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue("")) }
+    // People picked from the suggestions; only those still named in the text are tagged.
+    var chosen by remember { mutableStateOf(emptyList<MentionCandidate>()) }
     // The text stays until the relay took it, so a failed send can be retried.
     var clearedAt by rememberSaveable { mutableStateOf(sentCount) }
     LaunchedEffect(sentCount) {
         if (sentCount != clearedAt) {
-            text = ""
+            value = TextFieldValue("")
+            chosen = emptyList()
             clearedAt = sentCount
         }
     }
+    val query = if (value.selection.collapsed) Mentions.queryAt(value.text, value.selection.start) else null
+    val suggestions = query?.let { Mentions.candidates(mentionable, it.query) }.orEmpty()
     Column(Modifier.fillMaxWidth().imePadding()) {
         error?.let {
             Text(stringResource(R.string.community_client_send_failed, it), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp))
+        }
+        if (query != null && suggestions.isNotEmpty()) {
+            MentionSuggestions(suggestions) { picked ->
+                val before = value.text.substring(0, query.start)
+                val after = value.text.substring(value.selection.start)
+                val inserted = "@${picked.label} "
+                value = TextFieldValue(before + inserted + after, selection = TextRange(before.length + inserted.length))
+                chosen = chosen + picked
+            }
         }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -784,8 +814,8 @@ private fun Composer(hint: String, sending: Boolean, error: String?, sentCount: 
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
+                value = value,
+                onValueChange = { value = it },
                 modifier = Modifier.weight(1f).testTag("community_composer"),
                 // Read-only, not disabled, while sending: disabling would drop the focus and close the keyboard.
                 readOnly = sending,
@@ -796,13 +826,34 @@ private fun Composer(hint: String, sending: Boolean, error: String?, sentCount: 
             if (sending) {
                 CircularProgressIndicator(Modifier.size(24.dp), color = OrangeAccent, strokeWidth = 2.dp)
             } else {
+                val text = value.text
                 IconButton(
-                    onClick = { onSend(text.trim()) },
+                    onClick = { onSend(text.trim(), chosen) },
                     enabled = text.isNotBlank(),
                     modifier = Modifier.testTag("community_send"),
                 ) {
                     Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.action_send), tint = if (text.isNotBlank()) OrangeAccent else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+            }
+        }
+    }
+}
+
+/** Members matching the `@` the user is typing; tapping one puts the name into the text. */
+@Composable
+private fun MentionSuggestions(suggestions: List<MentionCandidate>, onPick: (MentionCandidate) -> Unit) {
+    Card(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp).testTag("community_mention_suggestions"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        suggestions.forEach { candidate ->
+            Row(
+                Modifier.fillMaxWidth().clickable { onPick(candidate) }.padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("@" + candidate.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Text(shortNpubOf(candidate.pubkey), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -890,6 +941,10 @@ private fun authorLabel(pubkey: String, profiles: Map<String, CommunityProfile>)
 @Composable
 private fun authorName(pubkey: String, profiles: Map<String, CommunityProfile>, me: String): String =
     profiles[pubkey]?.label ?: if (pubkey == me) stringResource(R.string.community_client_you) else shortNpubOf(pubkey)
+
+/** Room members as mention suggestions, named as the timeline names them. */
+private fun mentionCandidates(members: List<String>, profiles: Map<String, CommunityProfile>, me: String): List<MentionCandidate> =
+    members.filter { it != me }.map { MentionCandidate(it, authorLabel(it, profiles)) }
 
 private val npubs = java.util.concurrent.ConcurrentHashMap<String, String>()
 

@@ -231,8 +231,8 @@ class CommunityClient(
     }
 
     /** Sends a message, or a thread reply when [replyTo] is set. */
-    suspend fun sendMessage(channelId: String, text: String, replyTo: ThreadRef? = null): PublishResult =
-        session.publish(CommunityEventTemplates.streamMessage(channelId, text, clock.nowSeconds(), replyTo))
+    suspend fun sendMessage(channelId: String, text: String, replyTo: ThreadRef? = null, mentions: List<String> = emptyList()): PublishResult =
+        session.publish(CommunityEventTemplates.streamMessage(channelId, text, clock.nowSeconds(), replyTo, mentions))
 
     /** Reacts to a message with [emoji]. */
     suspend fun react(messageId: String, emoji: String): PublishResult =
@@ -258,11 +258,22 @@ class CommunityClient(
     suspend fun report(target: ReportTarget, type: ReportType, reason: String): PublishResult =
         session.publish(CommunityEventTemplates.report(target, type, reason, clock.nowSeconds()))
 
-    suspend fun createForumPost(channelId: String, text: String): PublishResult =
-        session.publish(CommunityEventTemplates.forumPost(channelId, text, clock.nowSeconds()))
+    suspend fun createForumPost(channelId: String, text: String, mentions: List<String> = emptyList()): PublishResult =
+        session.publish(CommunityEventTemplates.forumPost(channelId, text, clock.nowSeconds(), mentions))
 
-    suspend fun commentOnForumPost(channelId: String, postId: String, text: String): PublishResult =
-        session.publish(CommunityEventTemplates.forumComment(channelId, postId, text, clock.nowSeconds()))
+    suspend fun commentOnForumPost(channelId: String, postId: String, text: String, mentions: List<String> = emptyList()): PublishResult =
+        session.publish(CommunityEventTemplates.forumComment(channelId, postId, text, clock.nowSeconds(), mentions))
+
+    /** The members of one room, from the relay's newest member list; empty if it has none. */
+    suspend fun roomMembers(channelId: String): List<ChannelMember> {
+        awaitReady()
+        return session.query(listOf(CommunityFilters.channelMembers(channelId)))
+            .mapNotNull { ChannelMembers.fromEvent(it) }
+            .filter { it.channelId == channelId }
+            .maxByOrNull { it.revisionAt }
+            ?.members
+            .orEmpty()
+    }
 
     /**
      * A stream room: the newest top-level rows from the NIP-CW window, then live
