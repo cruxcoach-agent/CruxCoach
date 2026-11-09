@@ -24,7 +24,7 @@ class MicronutrientWeek @Inject constructor(
 ) {
     /** Null when none of the week's foods carries micronutrients. */
     suspend fun upTo(day: LocalDate, sex: Sex?, birthYear: Int?): MicroWatch.Summary? = withContext(Dispatchers.IO) {
-        service.ensureReady()
+        service.ensureReady(); Thread.sleep(1500) // TEMP-REPRO
         val entries = service.repo.foodLogBetween(day.minus(DatePeriod(days = 6)).toString(), day.toString())
         val foods = entries.mapNotNull { it.foodItemId }.toSet().associateWith { id ->
             val food = when {
