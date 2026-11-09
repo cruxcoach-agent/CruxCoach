@@ -66,6 +66,8 @@ data class ExternalBoardLayer(
     val climbName: String? = null,
     /** Null means unknown, not an empty climb. */
     val holds: List<BoardHold>? = null,
+    /** A colour of this installation's PaintBox picture, not another climber. */
+    val paintBox: Boolean = false,
 )
 
 data class BoardLayerRouteDetails(
@@ -161,6 +163,13 @@ class BoardLayerManager @Inject constructor(
     private val identities = List(MAX_LAYER_IDENTITIES) { slot ->
         deriveFipsSafeUuid("cruxcoach-board-layer-v1|$installationId|$slot")
     }
+    // Separate from climb slots: painting must never claim or replace a staged climb.
+    private val paintIdentities = List(4) { color ->
+        deriveFipsSafeUuid("cruxcoach-paintbox-v1|$installationId|$color")
+    }
+    fun paintIdentity(colorIndex: Int): String = paintIdentities[colorIndex]
+    fun ownsPaintIdentity(userUuid: String): Boolean =
+        paintIdentities.any { it.equals(userUuid, ignoreCase = true) }
 
     private val _state = MutableStateFlow(BoardLayerState())
     val state: StateFlow<BoardLayerState> = _state.asStateFlow()
@@ -176,7 +185,7 @@ class BoardLayerManager @Inject constructor(
     /** Trust-boundary predicate used by the BLE transport before any scoped
      * Quantum mutation. A syntactically valid UUID is not proof of ownership. */
     fun ownsIdentity(userUuid: String): Boolean =
-        identities.any { it.equals(userUuid, ignoreCase = true) }
+        identities.any { it.equals(userUuid, ignoreCase = true) } || ownsPaintIdentity(userUuid)
 
     fun nextAvailableSlot(brand: BoardBrand, preferred: Int? = null): Int? {
         val max = brand.maxSimultaneousClimbs
@@ -437,6 +446,7 @@ class BoardLayerManager @Inject constructor(
                     climbUuid = previous?.climbUuid,
                     climbName = previous?.climbName,
                     holds = previous?.holds,
+                    paintBox = ownsPaintIdentity(player.userId),
                 )
             }
             current.copy(

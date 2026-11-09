@@ -738,6 +738,19 @@ class BoardBleConnection(
     // more than once (e.g. startQueue + promoteToHost) and release once.
     private val keepAliveOwners = mutableSetOf<String>()
     private val keepAliveLock = Any()
+    private val automaticProjectionPauseOwners = mutableSetOf<String>()
+
+    /** A manual editor may be visible above a still-alive climb-detail ViewModel. */
+    val automaticProjectionPaused: Boolean
+        get() = synchronized(keepAliveLock) { automaticProjectionPauseOwners.isNotEmpty() }
+
+    fun pauseAutomaticProjection(owner: String) {
+        synchronized(keepAliveLock) { automaticProjectionPauseOwners.add(owner) }
+    }
+
+    fun resumeAutomaticProjection(owner: String) {
+        synchronized(keepAliveLock) { automaticProjectionPauseOwners.remove(owner) }
+    }
     private val _keepAliveActive = MutableStateFlow(false)
     /** True while a session or the relay owns the physical board connection. */
     val keepAliveActive: StateFlow<Boolean> = _keepAliveActive.asStateFlow()
@@ -2147,7 +2160,9 @@ class BoardBleConnection(
             // The CRC terminates one protocol frame and the controller parses
             // one such frame per fff2 characteristic write. Do not fragment a
             // frame into otherwise successful but semantically invalid writes.
-            if (!writeChunks(writes)) return false
+            // A started write waits for its own callback even if the caller
+            // leaves, so a late callback cannot acknowledge the next command.
+            if (!withContext(NonCancellable) { writeChunks(writes) }) return false
             if (index != frames.lastIndex) delay(100)
         }
         return true
@@ -2454,11 +2469,15 @@ class BoardBleConnection(
      * Encode [leds] ((position, colourByte) pairs) with the CONNECTED board's
      * encoder — the apiLevel/ledsPerHold configured in [connect] — and write
      * them. Used by the easter animation so an @2 legacy board gets v2
-     * packets instead of frames from a hardcoded API-3 encoder.
+     * packets instead of frames from a hardcoded API-3 encoder, and by PaintBox.
+     *
+     * @param maxPowerW a lower @2 power budget for this frame (headroom), or
+     *   null for the board's full budget.
      */
     suspend fun sendRawLeds(
         leds: List<Pair<Int, Int>>,
         expectedBrand: BoardBrand? = null,
+        maxPowerW: Double? = null,
     ): Boolean = writeMutex.withLock {
         if (cleaningState.value.active) return false
         val ticket = cleaning.ticket()
@@ -2466,16 +2485,28 @@ class BoardBleConnection(
             !auroraPacketsAllowed(_connectedBoardBrand.value) ||
             !boardScopedCommandAllowed(_connectedBoardBrand.value, expectedBrand)
         ) return false
-        if (encoder.litNothing(leds)) {
-            Log.w(TAG, "Refusing an API-2 frame of ${leds.size} LEDs: the 18 W budget would light none of them")
+        val frameEncoder = maxPowerW?.let(encoder::withMaxPower) ?: encoder
+        if (frameEncoder.litNothing(leds)) {
+            Log.w(TAG, "Refusing an API-2 frame of ${leds.size} LEDs: the power budget would light none of them")
             return false
         }
-        val chunks = encoder.encodeClimb(leds)
-        val success = writeChunks(chunks)
-        // The easter frames replace whatever climb was lit.
-        _litFrame.value = null
-        if (success) cleaning.projected(ticket, chunks)
-        return success
+        _connectionState.value = ConnectionState.SENDING
+        disconnectJob?.cancel()
+        try {
+            val chunks = frameEncoder.encodeClimb(leds)
+            // A frame that has started is finished even if the caller leaves: a
+            // torn Aurora packet would garble the next send (see sendAnimationLeds).
+            val success = withContext(NonCancellable) { writeChunks(chunks) }
+            // The easter frames replace whatever climb was lit.
+            _litFrame.value = null
+            if (success) cleaning.projected(ticket, chunks)
+            return success
+        } finally {
+            if (_connectionState.value == ConnectionState.SENDING) {
+                _connectionState.value = ConnectionState.CONNECTED
+                resetIdleTimer()
+            }
+        }
     }
 
     /**
@@ -2564,10 +2595,14 @@ class BoardBleConnection(
             val chunks = payload.toList()
                 .chunked(BoardPacketEncoder.BLE_MTU)
                 .map { it.toByteArray() }
-            val success = writeChunks(
-                chunks,
-                interChunkDelayMs = MOONBOARD_UART_INTER_CHUNK_DELAY_MS,
-            )
+            // A full wall takes seconds over the UART pacing. Leaving meanwhile must
+            // not cut the `l#…#` frame short: the box would read the next send into it.
+            val success = withContext(NonCancellable) {
+                writeChunks(
+                    chunks,
+                    interChunkDelayMs = MOONBOARD_UART_INTER_CHUNK_DELAY_MS,
+                )
+            }
             _litFrame.value = null
             if (success) cleaning.projected(cleaningTicket, chunks)
             return success
