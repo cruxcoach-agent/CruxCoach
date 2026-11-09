@@ -122,6 +122,7 @@ abstract class AthleteScreenTest {
             }
             viewModels.clear()
             athleteDriver.close(); secureDriver.close()
+            if (javaClass.simpleName == "NutritionAlwaysOnTest") Thread.sleep(3000) // TEMP-REPRO: keep the test open while the delayed query runs
         }
     }
 
